@@ -7,6 +7,7 @@ import (
 	"rock-cluster/pkg/plugin/analysis"
 	"rock-cluster/pkg/plugin/detection"
 	llamacpp "rock-cluster/pkg/plugin/analysis/llamacpp"
+	llamacpp_text "rock-cluster/pkg/plugin/analysis/llamacpp_text"
 	rknn "rock-cluster/pkg/plugin/detection/rknn"
 )
 
@@ -20,5 +21,8 @@ func init() {
 	// Register analysis plugins
 	RegisterAnalysis("llamacpp", func() analysis.Analyzer {
 		return llamacpp.New()
+	})
+	RegisterAnalysis("llamacpp-text", func() analysis.Analyzer {
+		return llamacpp_text.New()
 	})
 }
