@@ -187,6 +187,7 @@ DB_USER=camera_brain
 DB_PASSWORD=change_me
 NATS_URL=nats://localhost:4222
 LLAMA_SERVER_URL=http://localhost:8888
+LLAMA_TEXT_SERVER_URL=http://localhost:8889
 VLM_PROCESSOR_PORT=8081
 QUERY_ENGINE_PORT=8082
 GATEWAY_PORT=8080
@@ -568,10 +569,13 @@ main() {
     echo "Binaries:      $BIN_DIR"
     echo ""
     echo "Next steps:"
-    echo "  1. Download LFM2.5 models to ${CB_MODEL_DIR:-/var/lib/camera-brain/models}/"
-    echo "  2. Place yolov5s_int8.rknn model in the models directory"
-    echo "  3. Update configuration at $CONFIG_DIR/camera-brain.env"
-    echo "  4. View logs: journalctl -fu camera-brain-gateway.service"
+    echo "  1. Download LFM2.5-VL-1.6B models to ${CB_MODEL_DIR:-/var/lib/camera-brain/models}/"
+    echo "     - LFM2.5-VL-1.6B.Q8_0.gguf (vision-language model)"
+    echo "     - LFM2.5-VL-1.6B.mmproj-f16.gguf (multi-modal projector)"
+    echo "  2. [Optional] Download LFM2.5-1.2B-Instruct.Q4_K_M.gguf for text-only query interpretation"
+    echo "  3. Place yolov5s_int8.rknn model in the models directory"
+    echo "  4. Update configuration at $CONFIG_DIR/camera-brain.env"
+    echo "  5. View logs: journalctl -fu camera-brain-gateway.service"
     echo ""
 }
 
