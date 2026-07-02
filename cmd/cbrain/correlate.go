@@ -42,17 +42,7 @@ var correlateTrackCmd = &cobra.Command{
 		}
 		defer db.Close()
 
-		query := `
-SELECT
-    detected_at,
-    camera_id,
-    attributes->>'confidence' as confidence,
-    attributes
-FROM observations
-WHERE class_name ILIKE $1
-  AND detected_at > NOW() - INTERVAL '30 minutes'
-ORDER BY detected_at DESC
-LIMIT 100`
+		query := fmt.Sprintf("SELECT detected_at, camera_id, attributes->>'confidence' as confidence, attributes FROM observations WHERE class_name ILIKE $1 AND detected_at > NOW() - INTERVAL '%d minutes' ORDER BY detected_at DESC LIMIT 100", windowMinutes)
 
 		escaped := escapeILIKE(entityType)
 		rows, err := db.Query(query, "%"+escaped+"%")
