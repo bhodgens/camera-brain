@@ -13,10 +13,11 @@ import (
 
 // Config is the root configuration structure.
 type Config struct {
-	Detection DetectionConfig       `yaml:"detection"`
-	Analysis  AnalysisConfig        `yaml:"analysis"`
-	Storage   StorageConfig         `yaml:"storage"`
-	Service   ServiceConfig         `yaml:"service"`
+	Detection    DetectionConfig      `yaml:"detection"`
+	Analysis     AnalysisConfig       `yaml:"analysis"`
+	TextAnalysis TextAnalysisConfig   `yaml:"text_analysis"`
+	Storage      StorageConfig        `yaml:"storage"`
+	Service      ServiceConfig        `yaml:"service"`
 }
 
 // DetectionConfig contains detection plugin settings.
@@ -74,6 +75,37 @@ func (c *AnalysisPluginConfig) ToPluginConfig() analysis.Config {
 		Endpoint:    c.Endpoint,
 		ModelPath:   c.ModelPath,
 		MMProjPath:  c.MMProjPath,
+		APIKey:      c.APIKey,
+		MaxTokens:   c.MaxTokens,
+		Temperature: c.Temperature,
+		TimeoutSec:  c.TimeoutSec,
+		ModelName:   c.ModelName,
+	}
+}
+
+// TextAnalysisConfig contains text-only analysis plugin settings.
+type TextAnalysisConfig struct {
+	Plugin string                    `yaml:"plugin"`
+	Config TextAnalysisPluginConfig  `yaml:"config"`
+}
+
+// TextAnalysisPluginConfig holds text-only analysis plugin settings.
+type TextAnalysisPluginConfig struct {
+	Endpoint    string  `yaml:"endpoint"`
+	ModelPath   string  `yaml:"model_path"`
+	APIKey      string  `yaml:"api_key,omitempty"`
+	MaxTokens   int     `yaml:"max_tokens"`
+	Temperature float32 `yaml:"temperature"`
+	TimeoutSec  int     `yaml:"timeout_sec"`
+	ModelName   string  `yaml:"model_name,omitempty"`
+}
+
+// ToPluginConfig converts to analysis.Config for text-only usage (MMProjPath is empty).
+func (c *TextAnalysisPluginConfig) ToPluginConfig() analysis.Config {
+	return analysis.Config{
+		Endpoint:    c.Endpoint,
+		ModelPath:   c.ModelPath,
+		MMProjPath:  "",
 		APIKey:      c.APIKey,
 		MaxTokens:   c.MaxTokens,
 		Temperature: c.Temperature,
@@ -147,6 +179,15 @@ func (c *Config) setDefaults() {
 	if c.Analysis.Config.TimeoutSec == 0 {
 		c.Analysis.Config.TimeoutSec = 120
 	}
+	if c.TextAnalysis.Config.MaxTokens == 0 {
+		c.TextAnalysis.Config.MaxTokens = 512
+	}
+	if c.TextAnalysis.Config.Temperature == 0 {
+		c.TextAnalysis.Config.Temperature = 0.3
+	}
+	if c.TextAnalysis.Config.TimeoutSec == 0 {
+		c.TextAnalysis.Config.TimeoutSec = 60
+	}
 	if c.Storage.Plugin == "" {
 		c.Storage.Plugin = "postgres"
 	}
@@ -215,6 +256,16 @@ func LoadFromEnv() (*Config, error) {
 				MaxTokens:   256,
 				Temperature: 0.1,
 				TimeoutSec:  120,
+			},
+		},
+		TextAnalysis: TextAnalysisConfig{
+			Plugin: getEnv("TEXT_ANALYSIS_PLUGIN", "llamacpp-text"),
+			Config: TextAnalysisPluginConfig{
+				Endpoint:    getEnv("LLAMA_TEXT_SERVER_URL", "http://localhost:8889"),
+				ModelPath:   getEnv("TEXT_MODEL_PATH", "/var/lib/camera-brain/models/LFM2.5-1.2B-Instruct.Q4_K_M.gguf"),
+				MaxTokens:   512,
+				Temperature: 0.3,
+				TimeoutSec:  60,
 			},
 		},
 		Storage: StorageConfig{
