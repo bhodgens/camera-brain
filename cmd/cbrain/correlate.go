@@ -4,8 +4,8 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -50,11 +50,12 @@ SELECT
     attributes
 FROM observations
 WHERE class_name ILIKE $1
-  AND detected_at > NOW() - INTERVAL '24 hours'
+  AND detected_at > NOW() - INTERVAL '30 minutes'
 ORDER BY detected_at DESC
 LIMIT 100`
 
-		rows, err := db.Query(query, "%"+entityType+"%")
+		escaped := escapeILIKE(entityType)
+		rows, err := db.Query(query, "%"+escaped+"%")
 		if err != nil {
 			return err
 		}
@@ -109,14 +110,14 @@ LIMIT 50`
 	},
 }
 
-func formatTracking(w io.Writer, format string, rows *sql.Rows, windowMinutes int) error {
+func formatTracking(tw *tabwriter.Writer, format string, rows *sql.Rows, windowMinutes int) error {
 	if format == "json" {
-		return formatJSON(w, rows)
+		return formatJSON(tw, rows)
 	}
 
-	fmt.Fprintln(w, "=== Movement Trail ===")
-	fmt.Fprintln(w, "Time\tCamera\tConfidence\tDetails")
-	fmt.Fprintln(w, "----\t------\t----------\t-------")
+	fmt.Fprintln(tw, "=== Movement Trail ===")
+	fmt.Fprintln(tw, "Time\tCamera\tConfidence\tDetails")
+	fmt.Fprintln(tw, "----\t------\t----------\t-------")
 
 	var lastCamera string
 	var lastTime time.Time
@@ -151,7 +152,7 @@ func formatTracking(w io.Writer, format string, rows *sql.Rows, windowMinutes in
 			}
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s %s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s %s\n",
 			detectedAt.Format("15:04:05"),
 			cam,
 			conf,
@@ -162,17 +163,17 @@ func formatTracking(w io.Writer, format string, rows *sql.Rows, windowMinutes in
 		lastTime = detectedAt
 	}
 
-	return w.(interface{ Flush() error }).Flush()
+	return tw.Flush()
 }
 
-func formatTimeline(w io.Writer, format string, rows *sql.Rows) error {
+func formatTimeline(tw *tabwriter.Writer, format string, rows *sql.Rows) error {
 	if format == "json" {
-		return formatJSON(w, rows)
+		return formatJSON(tw, rows)
 	}
 
-	fmt.Fprintln(w, "=== Event Timeline ===")
-	fmt.Fprintln(w, "Time\tCamera\tEvent\tDetails")
-	fmt.Fprintln(w, "----\t------\t-----\t-------")
+	fmt.Fprintln(tw, "=== Event Timeline ===")
+	fmt.Fprintln(tw, "Time\tCamera\tEvent\tDetails")
+	fmt.Fprintln(tw, "----\t------\t-----\t-------")
 
 	for rows.Next() {
 		var detectedAt time.Time
@@ -202,14 +203,21 @@ func formatTimeline(w io.Writer, format string, rows *sql.Rows) error {
 			details += "plate: " + plate.String
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
 			detectedAt.Format("2006-01-02 15:04"),
 			cam,
 			class,
 			details)
 	}
 
-	return w.(interface{ Flush() error }).Flush()
+	return tw.Flush()
+}
+
+func escapeILIKE(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 func cameraTransition(from, to string) string {
@@ -226,6 +234,5 @@ func init() {
 	rootCmd.AddCommand(correlateCmd)
 	correlateCmd.AddCommand(correlateTrackCmd)
 	correlateCmd.AddCommand(correlateTimelineCmd)
-
-	correlateTrackCmd.Flags().IntP("window", "w", 10, "time window in minutes for correlation")
+	correlateCmd.PersistentFlags().IntP("window", "w", 10, "time window in minutes for correlation")
 }

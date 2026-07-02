@@ -1,7 +1,7 @@
 # Camera Brain Makefile
 # Build, test, and deployment automation
 
-.PHONY: help build clean test run-docker stop-docker clean-docker build-docker install build-cbrain
+.PHONY: help build clean test run-docker stop-docker clean-docker build-docker install build-cbrain install-dry-run
 
 # ============================================================================
 # Variables
@@ -39,11 +39,17 @@ help:
 # ============================================================================
 # Go Builds
 # ============================================================================
-build: $(SERVICES)
-
 $(SERVICES):
 	@echo "Building $@..."
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/$@ $(CMD_DIR)/$@
+
+build: $(SERVICES) build-cbrain
+	@for svc in $(SERVICES); do \
+		if [[ ! -x "$(BIN_DIR)/$$svc" ]]; then \
+			echo "Error: $(BIN_DIR)/$$svc not found"; \
+			exit 1; \
+		fi; \
+	done
 
 clean:
 	@echo "Cleaning..."

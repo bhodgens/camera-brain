@@ -2,22 +2,26 @@
 package main
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 )
 
 func TestParseQueryRequest(t *testing.T) {
 	tests := []struct {
 		query    string
-		wantJSON string
+		expected map[string]string
 	}{
-		{"person", `{"query":"person"}`},
-		{"vehicles in driveway", `{"query":"vehicles in driveway"}`},
+		{"person", map[string]string{"query": "person"}},
+		{"vehicles in driveway", map[string]string{"query": "vehicles in driveway"}},
 	}
 
 	for _, tt := range tests {
 		got := buildQueryRequest(tt.query)
-		if got != tt.wantJSON {
-			t.Errorf("buildQueryRequest(%q) = %v, want %v", tt.query, got, tt.wantJSON)
+		var gotMap map[string]string
+		json.Unmarshal([]byte(got), &gotMap)
+		if !reflect.DeepEqual(gotMap, tt.expected) {
+			t.Errorf("buildQueryRequest(%q) = %v, want %v", tt.query, gotMap, tt.expected)
 		}
 	}
 }

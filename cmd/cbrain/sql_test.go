@@ -15,6 +15,10 @@ func TestValidateSQL(t *testing.T) {
 		{"INSERT INTO observations", false},
 		{"UPDATE observations SET", false},
 		{"SELECT 1; DROP TABLE--", false},
+		{"TRUNCATE TABLE observations", false},
+		{"ALTER TABLE observations ADD", false},
+		{"CREATE TABLE evil", false},
+		{"SELECT 1 -- DROP TABLE", false},
 	}
 
 	for _, tt := range tests {
