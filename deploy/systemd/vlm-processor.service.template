@@ -1,0 +1,21 @@
+[Unit]
+Description=VLM Processor Service (Camera Brain)
+After=network.target llama-server.service
+Wants=llama-server.service
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{BIN_DIR}}
+EnvironmentFile={{CONFIG_DIR}}/camera-brain.env
+Environment="LLAMA_SERVER_URL={{LLAMA_SERVER_URL}}"
+Environment="PORT={{PORT}}"
+Environment="DB_HOST={{DB_HOST}}"
+ExecStart={{BIN_DIR}}/vlm-processor
+Restart=always
+RestartSec=5
+StandardOutput=append:{{LOG_DIR}}/vlm-processor.log
+StandardError=append:{{LOG_DIR}}/vlm-processor.log
+
+[Install]
+WantedBy=multi-user.target

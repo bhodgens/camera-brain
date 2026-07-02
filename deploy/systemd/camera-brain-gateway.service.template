@@ -1,0 +1,25 @@
+[Unit]
+Description=Camera Brain Gateway
+After=network.target nats.service postgresql.service
+Wants=nats.service postgresql.service
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{BIN_DIR}}
+EnvironmentFile={{CONFIG_DIR}}/camera-brain.env
+Environment="PORT={{PORT}}"
+Environment="DB_HOST={{DB_HOST}}"
+Environment="DB_PORT={{DB_PORT}}"
+Environment="DB_USER={{DB_USER}}"
+Environment="DB_PASSWORD={{DB_PASSWORD}}"
+Environment="DB_NAME={{DB_NAME}}"
+Environment="NATS_URL={{NATS_URL}}"
+ExecStart={{BIN_DIR}}/gateway
+Restart=always
+RestartSec=5
+StandardOutput=append:{{LOG_DIR}}/gateway.log
+StandardError=append:{{LOG_DIR}}/gateway.log
+
+[Install]
+WantedBy=multi-user.target

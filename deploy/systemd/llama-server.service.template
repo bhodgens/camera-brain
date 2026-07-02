@@ -1,0 +1,27 @@
+[Unit]
+Description=llama.cpp Server (Camera Brain)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{LLAMA_DIR}}
+Environment="LLAMA_SERVER_PORT={{PORT}}"
+ExecStart={{LLAMA_BIN}} \
+  -m {{MODEL_PATH}} \
+  --mmproj {{MMProj_PATH}} \
+  --host 0.0.0.0 \
+  --port {{PORT}} \
+  --ctx-size 4096 \
+  --n-gpu-layers 0 \
+  --threads {{CPU_THREADS}} \
+  --batch-size 512 \
+  --ubatch-size 512
+Restart=always
+RestartSec=10
+StandardOutput=append:{{LOG_DIR}}/llama-server.log
+StandardError=append:{{LOG_DIR}}/llama-server.log
+
+[Install]
+WantedBy=multi-user.target

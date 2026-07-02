@@ -1,0 +1,25 @@
+[Unit]
+Description=Query Engine Service (Camera Brain)
+After=network.target postgresql.service llama-server.service
+Wants=postgresql.service llama-server.service
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{BIN_DIR}}
+EnvironmentFile={{CONFIG_DIR}}/camera-brain.env
+Environment="LLAMA_SERVER_URL={{LLAMA_SERVER_URL}}"
+Environment="PORT={{PORT}}"
+Environment="DB_HOST={{DB_HOST}}"
+Environment="DB_PORT={{DB_PORT}}"
+Environment="DB_USER={{DB_USER}}"
+Environment="DB_PASSWORD={{DB_PASSWORD}}"
+Environment="DB_NAME={{DB_NAME}}"
+ExecStart={{BIN_DIR}}/query-engine
+Restart=always
+RestartSec=5
+StandardOutput=append:{{LOG_DIR}}/query-engine.log
+StandardError=append:{{LOG_DIR}}/query-engine.log
+
+[Install]
+WantedBy=multi-user.target

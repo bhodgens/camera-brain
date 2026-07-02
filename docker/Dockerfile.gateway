@@ -1,0 +1,45 @@
+# Camera Brain Gateway
+# Multi-stage build for minimal runtime image
+
+# ============================================================================
+# Build Stage
+# ============================================================================
+FROM golang:1.21-alpine AS builder
+
+RUN apk add --no-cache git pkgconfig
+
+WORKDIR /build
+
+# Download dependencies first (better caching)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY cmd/gateway/main.go ./cmd/gateway/main.go
+COPY pkg/ ./pkg/
+
+# Build
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /out/gateway ./cmd/gateway
+
+# ============================================================================
+# Runtime Stage
+# ============================================================================
+FROM alpine:3.19
+
+RUN apk add --no-cache ca-certificates tzdata
+
+# Create non-root user
+RUN addgroup -g 1000 camera-brain && \
+    adduser -D -u 1000 -G camera-brain camera-brain
+
+USER camera-brain
+WORKDIR /home/camera-brain
+
+COPY --from=builder /out/gateway /usr/local/bin/gateway
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/gateway"]
