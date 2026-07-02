@@ -3,6 +3,15 @@
 # Usage: ./install.sh [--dry-run] [--uninstall]
 set -euo pipefail
 
+cleanup() {
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log_error "Installation failed with exit code $rc. Manual cleanup may be needed."
+    fi
+    exit $rc
+}
+trap cleanup EXIT
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -157,6 +166,10 @@ generate_config() {
         if [[ "$DRY_RUN" == "false" ]]; then
             local random_pass
             random_pass=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c20)
+            if [[ -z "$random_pass" ]]; then
+                log_error "Failed to generate random password"
+                exit 1
+            fi
             sed -i "s/DB_PASSWORD=change_me_in_production/DB_PASSWORD=$random_pass/" "$config_file"
             log_success "Generated random database password"
         fi
@@ -276,11 +289,20 @@ build_cbrain() {
 
     # Build the binary
     run_or_echo go build -o "$BIN_DIR/cbrain" ./cmd/cbrain/
-    if [[ "$DRY_RUN" == "false" ]] && [[ -f "$BIN_DIR/cbrain" ]]; then
+
+    # Verify binary was produced
+    if ! [[ -x "$BIN_DIR/cbrain" ]]; then
+        log_error "Build verification failed: $BIN_DIR/cbrain does not exist or is not executable"
+        return 1
+    fi
+
+    if [[ "$DRY_RUN" == "false" ]]; then
         run_or_echo chmod 755 "$BIN_DIR/cbrain"
-        # Also copy to /usr/local/bin for easy access
-        run_or_echo cp "$BIN_DIR/cbrain" /usr/local/bin/
-        log_success "Built: $BIN_DIR/cbrain (also installed to /usr/local/bin/cbrain)"
+        # Copy to /usr/local/bin only if INSTALL_PREFIX is /usr/local
+        if [[ "$INSTALL_PREFIX" == "/usr/local" ]]; then
+            run_or_echo cp "$BIN_DIR/cbrain" /usr/local/bin/
+        fi
+        log_success "Built: $BIN_DIR/cbrain"
     fi
 }
 
@@ -487,6 +509,8 @@ do_uninstall() {
 
     # Remove binaries
     rm -f "$BIN_DIR/llama-server" "$BIN_DIR/vlm-processor" "$BIN_DIR/query-engine" "$BIN_DIR/gateway"
+    rm -f "$BIN_DIR/cbrain"
+    rm -f /usr/local/bin/cbrain
     log_info "Removed binaries"
 
     # Remove directories (keep data)
