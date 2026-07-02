@@ -2,6 +2,40 @@
 
 Distributed video surveillance system with edge AI inference and natural language querying.
 
+This is a small project I created to make use of local cameras via RTSP stream and  unused hardware I had sitting around. Time invested: a couple hours worth of ideation and implementation.  
+
+It's a proof of concept of what is trivially straightforward, with minimal resources, for a company like Flock: what kind of inferences and relationships can be built using very little resources? Everything this project does could easily be implemented within each camera installation, transporting only the metrics and relevant frame data to fairly minimalist could infrastructure: no massive datacenter required. 
+
+## Example 
+
+### Inferences and Observations:
+
+| Category | Example Inference | Data Sources |
+|----------|-------------------|--------------|
+| Family Routines | "Kids leave for school between 7:45-8:15 AM, return 2:45-4:30 PM" | Timestamped detections at front door + backpack attribute |
+| Visitor Patterns | "Mail carrier arrives 11:00 AM-12:00 PM, never weekends" | Daily person detection at mailbox + temporal aggregation |
+| Vehicle Usage | "Work truck only used on weekdays, SUV used weekends" | Vehicle classification + license plate recognition + day-of-week |
+| Security Alerts | "Unknown vehicle in driveway 2:00-4:00 AM (not family/friends)" | Unfamiliar plate + unusual time + no indoor motion correlation |
+| Package Delivery | "FedEx arrives Tue/Thu 1-3 PM, packages left at front door" | Uniform color + package attribute + drop location tracking |
+| Pet Monitoring | "Dog escapes yard 3x this week through loose gate" | Animal classification + yard boundary crossing + gate state |
+| Service Provider Verification | "Landscaper arrived 8 AM, 4 workers, stayed 3 hours" | Headcount + vehicle count + duration tracking |
+| Anomaly Detection | "Motion at back door at 3 AM - raccoon, not intruder" | Size classification + gait analysis + time context |
+
+###  Cross-Camera Correlations:
+
+  Camera 1 (Front Door): Person detected 7:52 AM, red jacket, heading east
+  Camera 2 (Driveway):   Vehicle departure 7:53 AM, black SUV
+  Camera 3 (Back Yard):  No activity
+  ─────────────────────────────────────────────────────────
+  Inference: Family member left for work via driveway (normal pattern)
+
+
+## Implementation 
+
+This was developed on and for a rPi5 w/ 8GB of memory as the primary brain and 5 rock3a boards with 2GB for NPU frame processing (archaic by modern NPU capabilities). With the NPUs it can process about 130 frames/second. It sits effectively idle with household cameras (indoor/outdoor) in a busy work-from-home household with children coming and going. 
+
+It uses LFM2.5 1.2b and VL LLMs and YOLOv5s detection model. 
+
 ## Quick Start
 
 ### Option 1: Docker (Recommended for Testing)
