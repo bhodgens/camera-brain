@@ -11,7 +11,8 @@ package rknn
 #include <stdio.h>
 #include <rknn_api.h>
 
-// Helper struct to avoid Go keyword conflict with 'type'
+// Helper struct to avoid Go keyword conflict with 'type' keyword.
+// Must match the fields of rknn_input in rknn_api.h exactly.
 typedef struct {
     uint32_t index;
     void* buf;
@@ -185,6 +186,9 @@ func (d *detector) Detect(ctx context.Context, img image.Image) ([]detection.Det
 
 	ret = C.rknn_outputs_get(d.ctx, C.uint(numOutputs), &outputs[0], nil)
 	if ret < 0 {
+		// BUG PREVENTION: Do NOT add early returns above this line or after this
+		// block. The defer below must fire before any early return, or the NPU
+		// output buffers will leak (C.rknn_outputs_release will never run).
 		return nil, fmt.Errorf("rknn_outputs_get failed: %d", ret)
 	}
 	defer C.rknn_outputs_release(d.ctx, C.uint(numOutputs), &outputs[0])
@@ -226,7 +230,7 @@ type yoloDet struct {
 	x1, y1, x2, y2 int
 }
 
-func (d *detector) parseYOLOv5Output(outputs []C.rknn.output) []detection.Detection {
+func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detection {
 	var allDets []yoloDet
 
 	for outIdx, output := range outputs {

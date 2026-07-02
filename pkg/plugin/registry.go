@@ -3,6 +3,7 @@ package plugin
 
 import (
 	"fmt"
+	"sync"
 
 	"rock-cluster/pkg/plugin/analysis"
 	"rock-cluster/pkg/plugin/detection"
@@ -22,6 +23,7 @@ type AnalysisPluginFactory func() analysis.Analyzer
 
 // Registry holds available plugins.
 type Registry struct {
+	mu               sync.RWMutex
 	detectionPlugins map[string]DetectionPluginFactory
 	analysisPlugins  map[string]AnalysisPluginFactory
 }
@@ -44,16 +46,22 @@ func DefaultRegistry() *Registry {
 
 // RegisterDetection adds a detection plugin to the registry.
 func (r *Registry) RegisterDetection(name string, factory DetectionPluginFactory) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.detectionPlugins[name] = factory
 }
 
 // RegisterAnalysis adds an analysis plugin to the registry.
 func (r *Registry) RegisterAnalysis(name string, factory AnalysisPluginFactory) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.analysisPlugins[name] = factory
 }
 
 // GetDetection creates a detection plugin by name.
 func (r *Registry) GetDetection(name string) (detection.Detector, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	factory, exists := r.detectionPlugins[name]
 	if !exists {
 		return nil, fmt.Errorf("unknown detection plugin: %s (available: %v)", name, r.AvailableDetections())
@@ -63,6 +71,8 @@ func (r *Registry) GetDetection(name string) (detection.Detector, error) {
 
 // GetAnalysis creates an analysis plugin by name.
 func (r *Registry) GetAnalysis(name string) (analysis.Analyzer, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	factory, exists := r.analysisPlugins[name]
 	if !exists {
 		return nil, fmt.Errorf("unknown analysis plugin: %s (available: %v)", name, r.AvailableAnalysis())
@@ -72,6 +82,8 @@ func (r *Registry) GetAnalysis(name string) (analysis.Analyzer, error) {
 
 // AvailableDetections returns a list of registered detection plugin names.
 func (r *Registry) AvailableDetections() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.detectionPlugins))
 	for name := range r.detectionPlugins {
 		names = append(names, name)
@@ -81,6 +93,8 @@ func (r *Registry) AvailableDetections() []string {
 
 // AvailableAnalysis returns a list of registered analysis plugin names.
 func (r *Registry) AvailableAnalysis() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.analysisPlugins))
 	for name := range r.analysisPlugins {
 		names = append(names, name)

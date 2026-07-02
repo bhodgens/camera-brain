@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,11 +23,19 @@ import (
 
 // Server is the gateway HTTP server.
 type Server struct {
-	db       *sql.DB
-	nats     *nats.Conn
-	registry *WorkerRegistry
-	port     int
-	mux      *http.ServeMux
+	db          *sql.DB
+	nats        *nats.Conn
+	registry    *WorkerRegistry
+	port        int
+	mux         *http.ServeMux
+	natsUnsubscribe func()
+}
+
+// Close releases resources held by the server.
+func (s *Server) Close() {
+	if s.natsUnsubscribe != nil {
+		s.natsUnsubscribe()
+	}
 }
 
 // Worker represents a connected worker node.
@@ -127,18 +136,22 @@ func (r *WorkerRegistry) AssignCamera(workerID string, cameraID uuid.UUID) error
 		"camera_id": cameraID.String(),
 		"action":    "assign",
 	}
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal assignment msg: %w", err)
+	}
 	return r.natsConn.Publish(fmt.Sprintf("workers.assignment.%s", workerID), data)
 }
 
 // NewServer creates a new gateway server.
-func NewServer(db *sql.DB, nc *nats.Conn, registry *WorkerRegistry, port int) *Server {
+func NewServer(db *sql.DB, nc *nats.Conn, registry *WorkerRegistry, port int, unsub func()) *Server {
 	s := &Server{
-		db:       db,
-		nats:     nc,
-		registry: registry,
-		port:     port,
-		mux:      http.NewServeMux(),
+		db:              db,
+		nats:            nc,
+		registry:        registry,
+		port:            port,
+		mux:             http.NewServeMux(),
+		natsUnsubscribe: unsub,
 	}
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/workers", s.handleWorkers)
@@ -150,14 +163,18 @@ func NewServer(db *sql.DB, nc *nats.Conn, registry *WorkerRegistry, port int) *S
 // handleHealth handles GET /health.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		slog.Warn("Failed to encode health response", "error", err)
+	}
 }
 
 // handleWorkers handles GET /workers.
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 	workers := s.registry.ListWorkers()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(workers)
+	if err := json.NewEncoder(w).Encode(workers); err != nil {
+		slog.Warn("Failed to encode workers response", "error", err)
+	}
 }
 
 // handleCameras handles GET /cameras and POST /cameras.
@@ -170,7 +187,9 @@ func (s *Server) handleCameras(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(cameras)
+		if err := json.NewEncoder(w).Encode(cameras); err != nil {
+			slog.Warn("Failed to encode cameras list response", "error", err)
+		}
 
 	case http.MethodPost:
 		var cam Camera
@@ -183,7 +202,9 @@ func (s *Server) handleCameras(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(cam)
+		if err := json.NewEncoder(w).Encode(cam); err != nil {
+			slog.Warn("Failed to encode camera create response", "error", err)
+		}
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -193,14 +214,16 @@ func (s *Server) handleCameras(w http.ResponseWriter, r *http.Request) {
 // handleCamera handles /cameras/{camera_id}/assign.
 func (s *Server) handleCamera(w http.ResponseWriter, r *http.Request) {
 	// Parse camera ID from path
-	cameraIDStr := r.URL.Path[len("/cameras/"):]
-	if cameraIDStr == "" || cameraIDStr == "assign" {
+	path := strings.TrimPrefix(r.URL.Path, "/cameras/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 1 || parts[0] == "" {
 		http.Error(w, "Invalid camera ID", http.StatusBadRequest)
 		return
 	}
+	cameraIDStr := parts[0]
 
 	// Handle assignment
-	if r.URL.Path[len("/cameras/"):] != "" && r.Method == http.MethodPost {
+	if r.Method == http.MethodPost {
 		workerID := r.URL.Query().Get("worker_id")
 		if workerID == "" {
 			http.Error(w, "worker_id query parameter required", http.StatusBadRequest)
@@ -219,7 +242,9 @@ func (s *Server) handleCamera(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "assigned"})
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": "assigned"}); err != nil {
+			slog.Warn("Failed to encode assignment response", "error", err)
+		}
 		return
 	}
 
@@ -283,8 +308,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	return server.Shutdown(shutdownCtx)
 }
 
-// listenHeartbeats subscribes to worker heartbeats.
-func listenHeartbeats(nc *nats.Conn, registry *WorkerRegistry) error {
+// listenHeartbeats subscribes to worker heartbeats and returns an unsubscribe function.
+func listenHeartbeats(nc *nats.Conn, registry *WorkerRegistry) (func(), error) {
 	_, err := nc.Subscribe("workers.heartbeat.>", func(msg *nats.Msg) {
 		var hb struct {
 			WorkerID  string `json:"worker_id"`
@@ -307,7 +332,13 @@ func listenHeartbeats(nc *nats.Conn, registry *WorkerRegistry) error {
 			slog.Warn("Failed to register heartbeat", "error", err)
 		}
 	})
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		// NATS subscription cleanup is handled by nc.Close() in main,
+		// but we return the function signature for consistency.
+	}, nil
 }
 
 func main() {
@@ -347,13 +378,15 @@ func main() {
 	registry := NewWorkerRegistry(db, nc)
 
 	// Start heartbeat listener
-	if err := listenHeartbeats(nc, registry); err != nil {
+	unsub, err := listenHeartbeats(nc, registry)
+	if err != nil {
 		slog.Error("Failed to subscribe to heartbeats", "error", err)
 		os.Exit(1)
 	}
 
 	// Create and start server
-	server := NewServer(db, nc, registry, cfg.Service.Port)
+	server := NewServer(db, nc, registry, cfg.Service.Port, unsub)
+	defer server.Close()
 
 	// Setup context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())

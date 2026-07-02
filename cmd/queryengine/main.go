@@ -107,7 +107,10 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	resp := QueryResponse{Success: true, Answer: answer, ParsedQuery: parsed, ResultCount: len(results), ProcessingMS: time.Since(start).Milliseconds()}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Warn("Failed to encode response", "error", err)
+		return
+	}
 }
 
 // handleHealth handles GET /health.
@@ -166,7 +169,12 @@ func (s *Server) executeQuery(parsed *ParsedQuery) ([]QueryResult, error) {
 		}
 		row := make(map[string]interface{})
 		for i, col := range cols {
-			row[col] = *(values[i].(*interface{}))
+			val := values[i].(*interface{})
+			if val == nil {
+				row[col] = nil
+			} else {
+				row[col] = *val
+			}
 		}
 		var r QueryResult
 		if v, ok := row["detected_at"].(string); ok {
@@ -182,6 +190,11 @@ func (s *Server) executeQuery(parsed *ParsedQuery) ([]QueryResult, error) {
 			json.Unmarshal(v, &r.Attributes)
 		}
 		results = append(results, r)
+	}
+
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
 	}
 	return results, nil
 }

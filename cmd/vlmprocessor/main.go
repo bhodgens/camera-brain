@@ -32,6 +32,9 @@ func (p *vlmPlugin) Analyze(ctx context.Context, image []byte, prompt string) (m
 	if err != nil {
 		return nil, err
 	}
+	if result == nil {
+		return map[string]interface{}{"raw_description": ""}, nil
+	}
 	// Merge Attributes with RawResponse as fallback
 	response := make(map[string]interface{})
 	for k, v := range result.Attributes {
@@ -121,7 +124,9 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Warn("Failed to encode response", "error", err)
+	}
 }
 
 // handleHealth handles GET /health.

@@ -80,12 +80,20 @@ func (p *vlmPlugin) Analyze(ctx context.Context, imgData []byte, prompt string) 
 		"temperature": p.temperature,
 	}
 
-	jsonData, _ := json.Marshal(reqBody)
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
 	resp, err := p.client.Post(p.endpoint+"/v1/chat/completions", "application/json", bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("llama-server request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("llama-server returned HTTP %d", resp.StatusCode)
+	}
 
 	var result struct {
 		Choices []struct {

@@ -196,8 +196,12 @@ build_llama_cpp() {
         return 0
     fi
 
-    log_info "Cloning llama.cpp..."
-    run_or_echo git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR"
+    if [[ ! -d "$LLAMA_DIR/.git" ]]; then
+        log_info "Cloning llama.cpp..."
+        run_or_echo git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR"
+    else
+        log_info "llama.cpp directory already exists, skipping clone"
+    fi
 
     log_info "Building llama.cpp with -j$(nproc)..."
     run_or_echo cmake -B "$LLAMA_DIR/build" -DLLAMA_BLAS=OFF "$LLAMA_DIR"
@@ -240,6 +244,10 @@ build_go_services() {
         if [[ -d "$project_root/cmd/$service" ]]; then
             log_info "Building $service..."
             run_or_echo go build -o "$BIN_DIR/$service" "$project_root/cmd/$service"
+            if ! [[ -x "$BIN_DIR/$service" ]]; then
+                log_error "Build verification failed: $BIN_DIR/$service does not exist"
+                return 1
+            fi
             log_success "Built: $BIN_DIR/$service"
         else
             log_warning "Service source not found: cmd/$service"
@@ -358,14 +366,17 @@ init_database() {
         log_info "Database user $DB_USER already exists"
     else
         log_info "Creating database user: $DB_USER"
-        sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';"
+        sudo -u postgres psql <<EOF
+CREATE USER "${DB_USER}" WITH PASSWORD '${DB_PASSWORD}';
+CREATE DATABASE "${DB_NAME}" OWNER "${DB_USER}";
+EOF
     fi
 
     if sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME"; then
         log_info "Database $DB_NAME already exists"
     else
         log_info "Creating database: $DB_NAME"
-        sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
+        sudo -u postgres psql -c "CREATE DATABASE \"${DB_NAME}\" OWNER \"${DB_USER}\";"
     fi
 
     # Run schema
