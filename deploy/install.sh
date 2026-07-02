@@ -256,6 +256,35 @@ build_go_services() {
 }
 
 # ============================================================================
+# Build cbrain CLI Tool
+# ============================================================================
+build_cbrain() {
+    log_info "Building cbrain CLI tool..."
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local project_root
+    project_root="$(dirname "$script_dir")"
+
+    # Check if Go source exists
+    if [[ ! -d "$project_root/cmd/cbrain" ]]; then
+        log_warning "cbrain source not found at $project_root/cmd/cbrain, skipping..."
+        return 0
+    fi
+
+    cd "$project_root"
+
+    # Build the binary
+    run_or_echo go build -o "$BIN_DIR/cbrain" ./cmd/cbrain/
+    if [[ "$DRY_RUN" == "false" ]] && [[ -f "$BIN_DIR/cbrain" ]]; then
+        run_or_echo chmod 755 "$BIN_DIR/cbrain"
+        # Also copy to /usr/local/bin for easy access
+        run_or_echo cp "$BIN_DIR/cbrain" /usr/local/bin/
+        log_success "Built: $BIN_DIR/cbrain (also installed to /usr/local/bin/cbrain)"
+    fi
+}
+
+# ============================================================================
 # Install Systemd Services
 # ============================================================================
 install_systemd_services() {
@@ -498,6 +527,7 @@ main() {
     generate_config
     build_llama_cpp
     build_go_services
+    build_cbrain
     install_systemd_services
     init_database
     start_services

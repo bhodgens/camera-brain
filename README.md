@@ -6,7 +6,28 @@ This is a small project I created to make use of local cameras via RTSP stream a
 
 It's a proof of concept of what is trivially straightforward, with minimal resources, for a company like Flock: what kind of inferences and relationships can be built using very little resources? Everything this project does could easily be implemented within each camera installation, transporting only the metrics and relevant frame data to fairly minimalist could infrastructure: no massive datacenter required. 
 
-## Example 
+## Example
+
+### CLI Queries with cbrain
+
+```bash
+# Natural language queries
+cbrain query "Who was at the front door this morning?"
+cbrain query "Show me all vehicles in the driveway last week" -o json
+
+# Direct SQL (read-only)
+cbrain sql "SELECT count(*) FROM observations"
+cbrain sql "SELECT class_name, count(*) FROM observations GROUP BY class_name"
+
+# Pattern analysis
+cbrain infer routines      # Detect daily routines
+cbrain infer anomalies     # Find unusual activity
+cbrain infer vehicles      # Vehicle usage patterns
+
+# Cross-camera correlation
+cbrain correlate timeline  # Chronological event timeline
+cbrain correlate track person  # Track person movement
+```
 
 ### Inferences and Observations:
 
@@ -21,13 +42,15 @@ It's a proof of concept of what is trivially straightforward, with minimal resou
 | Service Provider Verification | "Landscaper arrived 8 AM, 4 workers, stayed 3 hours" | Headcount + vehicle count + duration tracking |
 | Anomaly Detection | "Motion at back door at 3 AM - raccoon, not intruder" | Size classification + gait analysis + time context |
 
-###  Cross-Camera Correlations:
+### Cross-Camera Correlations:
 
-  Camera 1 (Front Door): Person detected 7:52 AM, red jacket, heading east
-  Camera 2 (Driveway):   Vehicle departure 7:53 AM, black SUV
-  Camera 3 (Back Yard):  No activity
-  ─────────────────────────────────────────────────────────
-  Inference: Family member left for work via driveway (normal pattern)
+| Camera | Observation |
+|--------|-------------|
+| Camera 1 (Front Door) | Person detected 7:52 AM, red jacket, heading east |
+| Camera 2 (Driveway) | Vehicle departure 7:53 AM, black SUV |
+| Camera 3 (Back Yard) | No activity |
+
+**Inference:** Family member left for work via driveway (normal pattern)
 
 
 ## Implementation 

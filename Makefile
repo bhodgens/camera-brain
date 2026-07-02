@@ -1,7 +1,7 @@
 # Camera Brain Makefile
 # Build, test, and deployment automation
 
-.PHONY: help build clean test run-docker stop-docker clean-docker build-docker install
+.PHONY: help build clean test run-docker stop-docker clean-docker build-docker install build-cbrain
 
 # ============================================================================
 # Variables
@@ -14,6 +14,9 @@ BIN_DIR := bin
 
 # Services
 SERVICES := vlm-processor query-engine gateway
+
+# CLI Tool
+CBRAIN_BIN = cbrain
 
 # ============================================================================
 # Help
@@ -30,6 +33,7 @@ help:
 	@echo "  clean-docker   Remove Docker volumes and containers"
 	@echo "  build-docker   Build Docker images"
 	@echo "  install        Run installer (requires sudo)"
+	@echo "  build-cbrain   Build the cbrain CLI tool only"
 	@echo ""
 
 # ============================================================================
@@ -46,6 +50,10 @@ clean:
 	rm -rf $(BIN_DIR)
 	rm -rf docker/build
 	go clean -cache
+
+build-cbrain:
+	@echo "Building $(CBRAIN_BIN)..."
+	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(CBRAIN_BIN) ./cmd/cbrain/
 
 test:
 	$(GO) test -v ./...
