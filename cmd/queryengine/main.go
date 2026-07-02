@@ -21,10 +21,11 @@ import (
 
 // Server is the query engine HTTP server.
 type Server struct {
-	db       *sql.DB
-	analyzer plugin.Analyzer
-	port     int
-	mux      *http.ServeMux
+	db           *sql.DB
+	analyzer     plugin.Analyzer    // VLM for image analysis
+	textAnalyzer plugin.Analyzer    // Text-only LLM for queries (optional)
+	port         int
+	mux          *http.ServeMux
 }
 
 // QueryRequest represents an incoming natural language query.
@@ -66,8 +67,8 @@ type QueryResult struct {
 }
 
 // NewServer creates a new query engine server.
-func NewServer(db *sql.DB, analyzer plugin.Analyzer, port int) *Server {
-	s := &Server{db: db, analyzer: analyzer, port: port, mux: http.NewServeMux()}
+func NewServer(db *sql.DB, analyzer plugin.Analyzer, textAnalyzer plugin.Analyzer, port int) *Server {
+	s := &Server{db: db, analyzer: analyzer, textAnalyzer: textAnalyzer, port: port, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/query", s.handleQuery)
 	s.mux.HandleFunc("/health", s.handleHealth)
 	return s
@@ -214,7 +215,13 @@ Original query: "%s"
 
 Generate a natural, helpful summary of the findings. If the results are sparse, acknowledge limitations. If there are clear patterns (times, locations, people), highlight them.`, query, contextBuf.String())
 
-	result, err := s.analyzer.Analyze(ctx, nil, prompt)
+	// Use text analyzer if available, otherwise fall back to VLM
+	analyzerToUse := s.textAnalyzer
+	if analyzerToUse == nil {
+		analyzerToUse = s.analyzer
+	}
+
+	result, err := analyzerToUse.Analyze(ctx, nil, prompt)
 	if err != nil {
 		return "", err
 	}
@@ -256,7 +263,24 @@ func main() {
 	}
 	defer analyzer.Close()
 
-	server := NewServer(db, analyzer, cfg.Service.Port+2)
+	// Optionally initialize text-only analyzer for query answer generation
+	var textAnalyzer plugin.Analyzer
+	if cfg.TextAnalysis.Plugin != "" && cfg.TextAnalysis.Config.Endpoint != "" {
+		textAnalyzer, err = plugin.GetAnalysis(cfg.TextAnalysis.Plugin)
+		if err != nil {
+			slog.Warn("Text LLM plugin not available, falling back to VLM", "error", err)
+		} else {
+			if err := textAnalyzer.Initialize(context.Background(), cfg.TextAnalysis.Config.ToPluginConfig()); err != nil {
+				slog.Warn("Text LLM initialization failed, falling back to VLM", "error", err)
+				textAnalyzer = nil
+			} else {
+				defer textAnalyzer.Close()
+				slog.Info("Text LLM initialized", "endpoint", cfg.TextAnalysis.Config.Endpoint, "model", cfg.TextAnalysis.Config.ModelPath)
+			}
+		}
+	}
+
+	server := NewServer(db, analyzer, textAnalyzer, cfg.Service.Port+2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
