@@ -70,18 +70,27 @@ Example queries:
 // isValidSQL checks whether a query contains only SELECT-like statements.
 // It blocks destructive SQL operations.
 func isValidSQL(query string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(query))
+	trimmed := strings.TrimSpace(query)
+	upper := strings.ToUpper(trimmed)
 
-	blocked := []string{"DROP ", "DELETE ", "INSERT ", "UPDATE ", "TRUNCATE ", "ALTER ", "CREATE ", "GRANT ", "REVOKE "}
-	for _, b := range blocked {
-		if strings.Contains(upper, b) {
-			return false
-		}
+	// Must start with SELECT, EXPLAIN, or SHOW
+	if !strings.HasPrefix(upper, "SELECT") &&
+		!strings.HasPrefix(upper, "EXPLAIN") &&
+		!strings.HasPrefix(upper, "SHOW") {
+		return false
 	}
 
-	// Check for statement injection via semicolons
-	if strings.Contains(upper, ";") {
+	// Block semicolons (multiple statements)
+	if strings.ContainsRune(trimmed, ';') {
 		return false
+	}
+
+	// Block common injection patterns
+	blocked := []string{"--", "/*", "*/"}
+	for _, b := range blocked {
+		if strings.Contains(trimmed, b) {
+			return false
+		}
 	}
 
 	return true
@@ -116,6 +125,10 @@ func formatSQLJSON(w io.Writer, cols []string, rows *sql.Rows) error {
 			row[col] = vals[i]
 		}
 		results = append(results, row)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
 	enc := json.NewEncoder(w)
@@ -165,6 +178,10 @@ func formatSQLTable(w io.Writer, cols []string, rows *sql.Rows) error {
 			}
 		}
 		fmt.Fprintln(tw)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
 	return tw.Flush()

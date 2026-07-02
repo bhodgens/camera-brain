@@ -54,7 +54,10 @@ func LoadConfig(path string) (*Config, error) {
 		case "DB_HOST":
 			cfg.DBHost = value
 		case "DB_PORT":
-			fmt.Sscanf(value, "%d", &cfg.DBPort)
+			_, err := fmt.Sscanf(value, "%d", &cfg.DBPort)
+			if err != nil {
+				return nil, fmt.Errorf("invalid DB_PORT %q: %w", value, err)
+			}
 		case "DB_NAME":
 			cfg.DBName = value
 		case "DB_USER":

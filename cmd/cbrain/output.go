@@ -44,12 +44,14 @@ func FormatQueryResponse(w io.Writer, format string, resp *QueryResponse) error 
 	default:
 		fmt.Fprintln(w, resp.Answer)
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(tw, "\nEntity\t%s\n", resp.ParsedQuery.EntityType)
-		fmt.Fprintf(tw, "Time Range\t%s to %s\n", resp.ParsedQuery.TimeRange.Start, resp.ParsedQuery.TimeRange.End)
 		fmt.Fprintf(tw, "Results\t%d\n", resp.ResultCount)
 		fmt.Fprintf(tw, "Processing\t%dms\n", resp.ProcessingMS)
-		if resp.ParsedQuery.SQL != "" {
-			fmt.Fprintf(tw, "SQL\t%s\n", resp.ParsedQuery.SQL)
+		if resp.ParsedQuery != nil {
+			fmt.Fprintf(tw, "\nEntity\t%s\n", resp.ParsedQuery.EntityType)
+			fmt.Fprintf(tw, "Time Range\t%s to %s\n", resp.ParsedQuery.TimeRange.Start, resp.ParsedQuery.TimeRange.End)
+			if resp.ParsedQuery.SQL != "" {
+				fmt.Fprintf(tw, "SQL\t%s\n", resp.ParsedQuery.SQL)
+			}
 		}
 		return tw.Flush()
 	}
