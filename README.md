@@ -55,9 +55,12 @@ cbrain correlate track person  # Track person movement
 
 ## Implementation 
 
-This was developed on and for a rPi5 w/ 8GB of memory as the primary brain and 5 rock3a boards with 2GB for NPU frame processing (archaic by modern NPU capabilities). With the NPUs it can process about 130 frames/second. It sits effectively idle with household cameras (indoor/outdoor) in a busy work-from-home household with children coming and going. 
+This was developed on and for a rPi5 w/ 8GB of memory as the primary brain and 5 rock3a boards with 2GB for NPU frame processing. With the NPUs it can process about 130 frames/second.
 
-It uses LFM2.5 1.2b and VL LLMs and YOLOv5s detection model. 
+**Model architecture:**
+- **LFM2.5-VL-1.6B**: Vision-language model for image crop analysis
+- **LFM2.5-1.2B-Instruct**: Text-only LLM for natural language query interpretation and answer generation
+- **YOLOv5s**: Detection model (NPU-accelerated)
 
 ## Quick Start
 
@@ -127,6 +130,9 @@ systemctl status camera-brain-*
 │                     ┌─────────────────────────────────┐
 │                     │      llama-server (8888)        │
 │                     │   LFM2.5-VL-1.6B (Vision LM)    │
+│                     ├─────────────────────────────────┤
+│                     │      llama-server (8889)        │
+│                     │   LFM2.5-1.2B-Instruct (Text)   │
 │                     └─────────────────────────────────┘
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -138,7 +144,8 @@ systemctl status camera-brain-*
 | Gateway | 8080 | Worker coordination, HTTP API |
 | VLM Processor | 8081 | Image analysis via VLM |
 | Query Engine | 8082 | Natural language queries |
-| llama-server | 8888 | Local LLM inference |
+| llama-server | 8888 | VLM inference (LFM2.5-VL-1.6B) |
+| llama-server | 8889 | Text LLM inference (LFM2.5-1.2B-Instruct) |
 | PostgreSQL | 5432 | Time-series storage |
 | NATS | 4222 | Message bus |
 | Grafana | 3000 | Dashboards |
@@ -164,6 +171,10 @@ LLAMA_MMPROJ=LFM2.5-VL-1.6B.mmproj-f16.gguf
 VLM_PORT=8081
 QUERY_PORT=8082
 GATEWAY_PORT=8080
+
+# Text LLM (optional, for faster query responses)
+TEXT_MODEL_PATH=/var/lib/camera-brain/models/LFM2.5-1.2B-Instruct.Q4_K_M.gguf
+LLAMA_TEXT_SERVER_URL=http://localhost:8889
 ```
 
 ### Plugin Configuration
@@ -191,6 +202,7 @@ See [docs/PLUGIN-GUIDE.md](docs/PLUGIN-GUIDE.md) for creating custom plugins.
 |-------|------|--------|
 | LFM2.5-VL-1.6B.Q8_0.gguf | ~1.2GB | Hugging Face |
 | LFM2.5-VL-1.6B.mmproj-f16.gguf | ~850MB | Hugging Face |
+| LFM2.5-1.2B-Instruct.Q4_K_M.gguf | ~700MB | Hugging Face |
 | yolov5s_int8.rknn | ~8MB | Export from ONNX |
 
 ## Hardware Requirements
