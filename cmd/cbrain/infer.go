@@ -48,7 +48,7 @@ SELECT
     camera_id
 FROM observations
 WHERE detected_at > NOW() - INTERVAL '14 days'
-GROUP BY 1, 2, 3, 4
+GROUP BY 1, 2, 3, 5
 HAVING count(*) > 3
 ORDER BY occurrences DESC
 LIMIT 20`
@@ -171,7 +171,7 @@ func formatRoutines(w io.Writer, format string, rows *sql.Rows) error {
 		return formatJSON(w, rows)
 	}
 
-tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "=== Detected Routines ===")
 	fmt.Fprintln(tw, "Class\tHour\tDay\tCount\tCamera")
 	fmt.Fprintln(tw, "------\t----\t---\t-----\t------")
@@ -194,6 +194,10 @@ tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 		}
 
 		fmt.Fprintf(tw, "%s\t%02d:00\t%s\t%d\t%s\n", className, int(hour), day, count, camera)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
 	return tw.Flush()
@@ -232,6 +236,10 @@ func formatAnomalies(w io.Writer, format string, rows *sql.Rows) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", detectedAt.Format("2006-01-02 15:04"), cam, class, conf)
 	}
 
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
 	return tw.Flush()
 }
 
@@ -264,11 +272,18 @@ func formatVehiclePatterns(w io.Writer, format string, rows *sql.Rows) error {
 		fmt.Fprintf(tw, "%s\t%s\t%d\n", d, t, sightings)
 	}
 
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
 	return tw.Flush()
 }
 
 func formatJSON(w io.Writer, rows *sql.Rows) error {
-	cols, _ := rows.Columns()
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
 	var results []map[string]any
 	for rows.Next() {
 		row := make(map[string]any)
@@ -277,11 +292,17 @@ func formatJSON(w io.Writer, rows *sql.Rows) error {
 		for i := range vals {
 			valPtrs[i] = &vals[i]
 		}
-		rows.Scan(valPtrs...)
+		if err := rows.Scan(valPtrs...); err != nil {
+			return err
+		}
 		for i, col := range cols {
 			row[col] = vals[i]
 		}
 		results = append(results, row)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
 	enc := json.NewEncoder(w)
@@ -322,7 +343,7 @@ FROM observations
 WHERE class_name = 'person'
   AND detected_at > NOW() - INTERVAL '30 days'
   AND camera_id IN ('front_door', 'mailbox', 'driveway')
-GROUP BY 1, 2, 3, 4
+GROUP BY 1, 2, 3, 5
 HAVING count(*) > 5
 ORDER BY visits DESC
 LIMIT 20`
@@ -371,6 +392,10 @@ func formatVisitors(w io.Writer, format string, rows *sql.Rows) error {
 		fmt.Fprintf(tw, "%s\t%s\t%02d:00\t%d\t%s\t%s\t%s\n",
 			className, day, int(hour), visits, cam,
 			firstSeen.Format("2006-01-02"), lastSeen.Format("2006-01-02"))
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
 	return tw.Flush()
@@ -474,6 +499,10 @@ func formatSecurity(w io.Writer, format string, rows *sql.Rows) error {
 			cam, class, details, conf)
 	}
 
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
 	return tw.Flush()
 }
 
@@ -508,7 +537,7 @@ FROM observations
 WHERE class_name ILIKE '%person%'
   AND attributes->>'uniform_color' IS NOT NULL
   AND detected_at > NOW() - INTERVAL '30 days'
-GROUP BY 1, 2, 4, 5
+GROUP BY 1, 2, 5, 6
 ORDER BY date DESC
 LIMIT 30`
 
@@ -558,6 +587,10 @@ func formatDeliveries(w io.Writer, format string, rows *sql.Rows) error {
 			date.Format("2006-01-02"),
 			dayNames[int(dow)],
 			int(hour), count, cam, uni)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
 	return tw.Flush()
@@ -644,6 +677,10 @@ func formatAnimals(w io.Writer, format string, rows *sql.Rows) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 			detectedAt.Format("2006-01-02 15:04"),
 			cam, class, c, conf)
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
 	return tw.Flush()
@@ -735,6 +772,10 @@ func formatWorkers(w io.Writer, format string, rows *sql.Rows) error {
 			dur)
 	}
 
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
 	return tw.Flush()
 }
 
@@ -743,7 +784,6 @@ func init() {
 	inferCmd.AddCommand(inferRoutinesCmd)
 	inferCmd.AddCommand(inferAnomaliesCmd)
 	inferCmd.AddCommand(inferVehiclesCmd)
-	// Task 4B: Additional inference commands
 	inferCmd.AddCommand(inferVisitorsCmd)
 	inferCmd.AddCommand(inferSecurityCmd)
 	inferCmd.AddCommand(inferDeliveriesCmd)
