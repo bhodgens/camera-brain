@@ -69,16 +69,14 @@ Example queries:
 
 // isValidSQL checks whether a query contains only SELECT-like statements.
 // It blocks destructive SQL operations.
+//
+// NOTE: PostgreSQL's EXPLAIN ANALYZE *executes* the underlying statement,
+// so EXPLAIN ANALYZE DELETE/UPDATE/INSERT/TRUNCATE is just as destructive
+// as running the statement directly. We therefore allow only plain
+// EXPLAIN (plan-only) prefixed to a read-only verb, and reject ANALYZE.
 func isValidSQL(query string) bool {
 	trimmed := strings.TrimSpace(query)
 	upper := strings.ToUpper(trimmed)
-
-	// Must start with SELECT, EXPLAIN, or SHOW
-	if !strings.HasPrefix(upper, "SELECT") &&
-		!strings.HasPrefix(upper, "EXPLAIN") &&
-		!strings.HasPrefix(upper, "SHOW") {
-		return false
-	}
 
 	// Block semicolons (multiple statements)
 	if strings.ContainsRune(trimmed, ';') {
@@ -93,7 +91,25 @@ func isValidSQL(query string) bool {
 		}
 	}
 
-	return true
+	// EXPLAIN ANALYZE executes the underlying statement — reject outright.
+	if strings.HasPrefix(upper, "EXPLAIN ANALYZE") ||
+		strings.HasPrefix(upper, "EXPLAIN  ANALYZE") {
+		return false
+	}
+
+	// Strip a leading "EXPLAIN " (plan-only) so we can validate the inner verb.
+	inner := upper
+	if strings.HasPrefix(inner, "EXPLAIN ") {
+		inner = strings.TrimSpace(inner[len("EXPLAIN "):])
+	}
+
+	// Must start with a read-only verb.
+	for _, verb := range []string{"SELECT", "SHOW", "WITH", "VALUES", "EXPLAIN"} {
+		if strings.HasPrefix(inner, verb) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatSQLResult(w io.Writer, format string, rows *sql.Rows) error {
@@ -110,7 +126,7 @@ func formatSQLResult(w io.Writer, format string, rows *sql.Rows) error {
 }
 
 func formatSQLJSON(w io.Writer, cols []string, rows *sql.Rows) error {
-	var results []map[string]any
+	results := make([]map[string]any, 0)
 	for rows.Next() {
 		row := make(map[string]any)
 		vals := make([]any, len(cols))

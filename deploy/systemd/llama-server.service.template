@@ -22,6 +22,11 @@ Restart=always
 RestartSec=10
 StandardOutput=append:{{LOG_DIR}}/llama-server.log
 StandardError=append:{{LOG_DIR}}/llama-server.log
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/camera-brain /var/log/camera-brain
 
 [Install]
 WantedBy=multi-user.target

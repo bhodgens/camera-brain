@@ -3,25 +3,30 @@ package main
 
 import (
 	"encoding/json"
-	"reflect"
 	"testing"
 )
 
-func TestParseQueryRequest(t *testing.T) {
+func TestBuildQueryRequest(t *testing.T) {
 	tests := []struct {
-		query    string
-		expected map[string]string
+		query string
+		want  string
 	}{
-		{"person", map[string]string{"query": "person"}},
-		{"vehicles in driveway", map[string]string{"query": "vehicles in driveway"}},
+		{"person", `{"query":"person"}`},
+		{"vehicles in driveway", `{"query":"vehicles in driveway"}`},
 	}
 
 	for _, tt := range tests {
 		got := buildQueryRequest(tt.query)
-		var gotMap map[string]string
-		json.Unmarshal([]byte(got), &gotMap)
-		if !reflect.DeepEqual(gotMap, tt.expected) {
-			t.Errorf("buildQueryRequest(%q) = %v, want %v", tt.query, gotMap, tt.expected)
+		if got != tt.want {
+			t.Errorf("buildQueryRequest(%q) = %s, want %s", tt.query, got, tt.want)
+		}
+		// Verify it round-trips back to the same query
+		var m map[string]string
+		if err := json.Unmarshal([]byte(got), &m); err != nil {
+			t.Fatalf("buildQueryRequest(%q) produced invalid JSON: %v", tt.query, err)
+		}
+		if m["query"] != tt.query {
+			t.Errorf("buildQueryRequest(%q) round-trip got %q", tt.query, m["query"])
 		}
 	}
 }

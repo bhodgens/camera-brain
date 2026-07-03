@@ -1,12 +1,12 @@
 [Unit]
 Description=VLM Processor Service (Camera Brain)
-After=network.target llama-server.service
-Wants=llama-server.service
+After=network.target postgresql.service llama-server.service
+Wants=postgresql.service llama-server.service
 
 [Service]
 Type=simple
 User={{USER}}
-WorkingDirectory={{BIN_DIR}}
+WorkingDirectory=/var/lib/camera-brain
 EnvironmentFile={{CONFIG_DIR}}/camera-brain.env
 Environment="LLAMA_SERVER_URL={{LLAMA_SERVER_URL}}"
 Environment="PORT={{PORT}}"
@@ -16,6 +16,11 @@ Restart=always
 RestartSec=5
 StandardOutput=append:{{LOG_DIR}}/vlm-processor.log
 StandardError=append:{{LOG_DIR}}/vlm-processor.log
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/camera-brain /var/log/camera-brain
 
 [Install]
 WantedBy=multi-user.target

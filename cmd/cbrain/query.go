@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -24,7 +25,7 @@ var queryCmd = &cobra.Command{
 			return fmt.Errorf("query text required")
 		}
 
-		queryText := bytes.Join(bytes.SplitN([]byte(args[0]), []byte(" "), -1), []byte(" "))
+		queryText := strings.Join(args, " ")
 
 		cfg, err := LoadConfig(cmd.Flag("config").Value.String())
 		if err != nil {
@@ -33,7 +34,7 @@ var queryCmd = &cobra.Command{
 
 		outputFormat, _ := cmd.Flags().GetString("output")
 
-		resp, err := postQuery(cfg.QueryURL+"/query", queryText)
+		resp, err := postQuery(cfg.QueryURL+"/query", []byte(queryText))
 		if err != nil {
 			return fmt.Errorf("query failed: %w", err)
 		}

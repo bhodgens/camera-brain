@@ -4,6 +4,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -52,8 +53,7 @@ var correlateTrackCmd = &cobra.Command{
 		defer rows.Close()
 
 		outputFormat, _ := cmd.Flags().GetString("output")
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		return formatTracking(tw, outputFormat, rows, windowMinutes)
+		return formatTracking(os.Stdout, outputFormat, rows, windowMinutes)
 	},
 }
 
@@ -95,15 +95,17 @@ LIMIT 50`
 		defer rows.Close()
 
 		outputFormat, _ := cmd.Flags().GetString("output")
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		return formatTimeline(tw, outputFormat, rows)
+		return formatTimeline(os.Stdout, outputFormat, rows)
 	},
 }
 
-func formatTracking(tw *tabwriter.Writer, format string, rows *sql.Rows, windowMinutes int) error {
+func formatTracking(w io.Writer, format string, rows *sql.Rows, windowMinutes int) error {
 	if format == "json" {
-		return formatJSON(tw, rows)
+		return formatJSON(w, rows)
 	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	defer tw.Flush()
 
 	fmt.Fprintln(tw, "=== Movement Trail ===")
 	fmt.Fprintln(tw, "Time\tCamera\tConfidence\tDetails")
@@ -153,13 +155,16 @@ func formatTracking(tw *tabwriter.Writer, format string, rows *sql.Rows, windowM
 		lastTime = detectedAt
 	}
 
-	return tw.Flush()
+	return nil
 }
 
-func formatTimeline(tw *tabwriter.Writer, format string, rows *sql.Rows) error {
+func formatTimeline(w io.Writer, format string, rows *sql.Rows) error {
 	if format == "json" {
-		return formatJSON(tw, rows)
+		return formatJSON(w, rows)
 	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	defer tw.Flush()
 
 	fmt.Fprintln(tw, "=== Event Timeline ===")
 	fmt.Fprintln(tw, "Time\tCamera\tEvent\tDetails")
@@ -200,7 +205,7 @@ func formatTimeline(tw *tabwriter.Writer, format string, rows *sql.Rows) error {
 			details)
 	}
 
-	return tw.Flush()
+	return nil
 }
 
 func escapeILIKE(s string) string {

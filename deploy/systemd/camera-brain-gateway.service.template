@@ -12,7 +12,6 @@ Environment="PORT={{PORT}}"
 Environment="DB_HOST={{DB_HOST}}"
 Environment="DB_PORT={{DB_PORT}}"
 Environment="DB_USER={{DB_USER}}"
-Environment="DB_PASSWORD={{DB_PASSWORD}}"
 Environment="DB_NAME={{DB_NAME}}"
 Environment="NATS_URL={{NATS_URL}}"
 ExecStart={{BIN_DIR}}/gateway
@@ -20,6 +19,11 @@ Restart=always
 RestartSec=5
 StandardOutput=append:{{LOG_DIR}}/gateway.log
 StandardError=append:{{LOG_DIR}}/gateway.log
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/camera-brain /var/log/camera-brain
 
 [Install]
 WantedBy=multi-user.target

@@ -17,35 +17,6 @@ import (
 	"rock-cluster/pkg/plugin"
 )
 
-// Analyzer is the interface for VLM analysis.
-type Analyzer interface {
-	Analyze(ctx context.Context, image []byte, prompt string) (map[string]interface{}, error)
-}
-
-// vlmPlugin wraps the analysis.Analyzer to return map[string]interface{}.
-type vlmPlugin struct {
-	analyzer plugin.Analyzer
-}
-
-func (p *vlmPlugin) Analyze(ctx context.Context, image []byte, prompt string) (map[string]interface{}, error) {
-	result, err := p.analyzer.Analyze(ctx, image, prompt)
-	if err != nil {
-		return nil, err
-	}
-	if result == nil {
-		return map[string]interface{}{"raw_description": ""}, nil
-	}
-	// Merge Attributes with RawResponse as fallback
-	response := make(map[string]interface{})
-	for k, v := range result.Attributes {
-		response[k] = v
-	}
-	if len(response) == 0 {
-		response["raw_description"] = result.RawResponse
-	}
-	return response, nil
-}
-
 // AnalysisRequest represents an incoming crop analysis request.
 type AnalysisRequest struct {
 	CameraID   string  `json:"camera_id"`
@@ -68,13 +39,13 @@ type AnalysisResponse struct {
 
 // Server is the VLM processor HTTP server.
 type Server struct {
-	analyzer Analyzer
+	analyzer plugin.Analyzer
 	port     int
 	mux      *http.ServeMux
 }
 
 // NewServer creates a new VLM processor server.
-func NewServer(analyzer Analyzer, port int) *Server {
+func NewServer(analyzer plugin.Analyzer, port int) *Server {
 	s := &Server{
 		analyzer: analyzer,
 		port:     port,
@@ -107,10 +78,27 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Analyze with VLM
-	attrs, err := s.analyzer.Analyze(r.Context(), imgData, buildPromptForClass(req.ClassName))
+	// Analyze with VLM directly via plugin.Analyzer. Serializes
+	// AnalysisResult.Attributes verbatim so Confidence/TokensUsed are
+	// preserved end-to-end instead of being stripped by a wrapper.
+	result, err := s.analyzer.Analyze(r.Context(), imgData, buildPromptForClass(req.ClassName))
 	if err != nil {
 		slog.Warn("VLM analysis failed", "error", err)
+		http.Error(w, "VLM analysis failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Fall back to RawResponse when Attributes is empty (preserves prior
+	// wrapper behavior without dropping analysis metadata).
+	var attrs map[string]interface{}
+	if result != nil {
+		attrs = result.Attributes
+	}
+	if len(attrs) == 0 {
+		attrs = map[string]interface{}{"raw_description": ""}
+		if result != nil && result.RawResponse != "" {
+			attrs["raw_description"] = result.RawResponse
+		}
 	}
 
 	// Generate crop ID
@@ -130,6 +118,11 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealth handles GET /health.
+//
+// The VLM analyzer is an in-process plugin with no external dependency to
+// probe at this layer (DB/NATS are owned by other services), so /health
+// reports liveness only. If the analyzer gains a remote dependency later,
+// add a targeted probe here.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -138,10 +131,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // Serve starts the HTTP server.
 func (s *Server) Serve(ctx context.Context) error {
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", s.port),
-		Handler:      s.mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		Addr:              fmt.Sprintf(":%d", s.port),
+		Handler:           s.mux,
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -193,11 +188,8 @@ func main() {
 	}
 	defer analyzer.Close()
 
-	// Wrap analyzer to return map[string]interface{}
-	vlmAnalyzer := &vlmPlugin{analyzer: analyzer}
-
 	// Create and start server
-	server := NewServer(vlmAnalyzer, cfg.Service.Port)
+	server := NewServer(analyzer, cfg.Service.Port)
 
 	// Setup context with cancellation on interrupt
 	ctx, cancel := context.WithCancel(context.Background())

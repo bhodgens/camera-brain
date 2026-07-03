@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ============================================================================
   # LLM Inference Server (VLM support)
@@ -148,13 +146,13 @@ services:
     image: nats:2.10-alpine
     container_name: cb-nats
     ports:
-      - "4222:4222"
+      - "127.0.0.1:4222:4222"
       - "127.0.0.1:8222:8222"
     command: ["-js"]
     volumes:
       - nats-data:/data
     healthcheck:
-      test: ["CMD", "nats-server", "-js", "-DV"]
+      test: ["CMD-SHELL", "nc -z localhost 4222 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3

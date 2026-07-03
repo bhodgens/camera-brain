@@ -95,6 +95,7 @@ WHERE (
     (EXTRACT(HOUR FROM detected_at) BETWEEN 0 AND 5)
     OR
     -- Low confidence detections
+    -- FIXME: cast errors if confidence is non-numeric; use CASE or regex guard
     (attributes->>'confidence')::float < 0.5
 )
 AND detected_at > NOW() - INTERVAL '7 days'
@@ -284,7 +285,7 @@ func formatJSON(w io.Writer, rows *sql.Rows) error {
 	if err != nil {
 		return err
 	}
-	var results []map[string]any
+	results := make([]map[string]any, 0)
 	for rows.Next() {
 		row := make(map[string]any)
 		vals := make([]any, len(cols))
@@ -296,6 +297,15 @@ func formatJSON(w io.Writer, rows *sql.Rows) error {
 			return err
 		}
 		for i, col := range cols {
+			// PostgreSQL JSONB columns arrive as []byte.
+			// encoding/json would base64-encode []byte, so decode to map.
+			if b, ok := vals[i].([]byte); ok {
+				var decoded any
+				if err := json.Unmarshal(b, &decoded); err == nil {
+					row[col] = decoded
+					continue
+				}
+			}
 			row[col] = vals[i]
 		}
 		results = append(results, row)
@@ -342,7 +352,7 @@ SELECT
 FROM observations
 WHERE class_name = 'person'
   AND detected_at > NOW() - INTERVAL '30 days'
-  AND camera_id IN ('front_door', 'mailbox', 'driveway')
+  AND camera_id IN (SELECT id FROM cameras WHERE name IN ('front_door', 'mailbox', 'driveway'))
 GROUP BY 1, 2, 3, 5
 HAVING count(*) > 5
 ORDER BY visits DESC
@@ -432,6 +442,7 @@ SELECT
 FROM observations
 WHERE (
     EXTRACT(HOUR FROM detected_at) BETWEEN 0 AND 5
+    -- FIXME: cast errors if confidence is non-numeric; use CASE or regex guard
     OR (attributes->>'confidence')::float < 0.6
 )
 AND detected_at > NOW() - INTERVAL '14 days'
@@ -509,7 +520,7 @@ func formatSecurity(w io.Writer, format string, rows *sql.Rows) error {
 var inferDeliveriesCmd = &cobra.Command{
 	Use:   "deliveries",
 	Short: "Package delivery tracking",
-	Long:  "Track deliveries by carrier (FedEx, UPS, USPS) with arrival times and drop locations.",
+	Long:  "Track recurring persons with uniform attributes (e.g., delivery or service workers) by day, time, and camera.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := LoadConfig(cmd.Flag("config").Value.String())
 		if err != nil {
@@ -532,7 +543,7 @@ SELECT
     max(EXTRACT(HOUR FROM detected_at)) as typical_hour,
     count(*) as deliveries,
     camera_id,
-    attributes->>'color' as uniform_color
+    attributes->>'uniform_color' as uniform_color
 FROM observations
 WHERE class_name ILIKE '%person%'
   AND attributes->>'uniform_color' IS NOT NULL
@@ -710,7 +721,7 @@ var inferWorkersCmd = &cobra.Command{
 SELECT
     date_trunc('day', detected_at) as date,
     camera_id,
-    count(DISTINCT attributes->>'vehicle_color') as vehicles,
+    count(DISTINCT attributes->>'vehicle_color') as distinct_vehicle_colors,
     count(*) as worker_sightings,
     min(detected_at) as arrival,
     max(detected_at) as departure,
@@ -741,17 +752,17 @@ func formatWorkers(w io.Writer, format string, rows *sql.Rows) error {
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "\n=== Service Providers ===")
-	fmt.Fprintln(tw, "Date\tCamera\tVehicles\tSightings\tArrival\tDeparture\tDuration")
-	fmt.Fprintln(tw, "----\t------\t--------\t---------\t-------\t---------\t--------")
+	fmt.Fprintln(tw, "Date\tCamera\tDistinct Colors\tSightings\tArrival\tDeparture\tDuration")
+	fmt.Fprintln(tw, "----\t------\t----------------\t---------\t-------\t---------\t--------")
 
 	for rows.Next() {
 		var date time.Time
 		var cameraID sql.NullString
-		var vehicles, sightings int64
+		var distinctColors, sightings int64
 		var arrival, departure time.Time
 		var duration sql.NullString
 
-		if err := rows.Scan(&date, &cameraID, &vehicles, &sightings, &arrival, &departure, &duration); err != nil {
+		if err := rows.Scan(&date, &cameraID, &distinctColors, &sightings, &arrival, &departure, &duration); err != nil {
 			return err
 		}
 
@@ -766,7 +777,7 @@ func formatWorkers(w io.Writer, format string, rows *sql.Rows) error {
 
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\t%s\n",
 			date.Format("2006-01-02"),
-			cam, vehicles, sightings,
+			cam, distinctColors, sightings,
 			arrival.Format("15:04"),
 			departure.Format("15:04"),
 			dur)

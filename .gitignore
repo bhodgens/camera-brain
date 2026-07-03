@@ -1,0 +1,13 @@
+# Build output
+bin/
+/cbrain
+/gateway
+/query-engine
+/vlm-processor
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env

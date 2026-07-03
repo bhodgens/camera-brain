@@ -84,11 +84,21 @@ func (p *vlmPlugin) Analyze(ctx context.Context, imgData []byte, prompt string) 
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
-	resp, err := p.client.Post(p.endpoint+"/v1/chat/completions", "application/json", bytes.NewReader(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint+"/v1/chat/completions", bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("llama-server request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("llama-server returned HTTP %d", resp.StatusCode)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()

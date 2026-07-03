@@ -3,7 +3,9 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 
@@ -131,6 +133,7 @@ type ServiceConfig struct {
 	LogLevel string `yaml:"log_level"`
 	DataDir  string `yaml:"data_dir"`
 	ModelDir string `yaml:"model_dir"`
+	NATSURL  string `yaml:"nats_url"`
 }
 
 // Load reads and validates configuration from a file.
@@ -231,6 +234,19 @@ func (c *Config) Validate() error {
 	if c.Storage.Plugin == "postgres" && (c.Storage.Host == "" || c.Storage.Database == "") {
 		return fmt.Errorf("storage.host and storage.database are required for postgres")
 	}
+	// Require password for non-local postgres (localhost trust auth is common in dev).
+	if c.Storage.Plugin == "postgres" &&
+		c.Storage.Host != "localhost" && c.Storage.Host != "127.0.0.1" &&
+		c.Storage.Password == "" {
+		return fmt.Errorf("storage.password is required for postgres when host is not localhost/127.0.0.1")
+	}
+	// Refuse sslmode=disable for non-local hosts unless explicitly allowed.
+	if c.Storage.Plugin == "postgres" &&
+		c.Storage.Host != "localhost" && c.Storage.Host != "127.0.0.1" &&
+		c.Storage.SSLMode == "disable" &&
+		os.Getenv("ALLOW_INSECURE_DB") != "1" {
+		return fmt.Errorf("storage.ssl_mode=disable is unsafe for non-local host %q; set ssl_mode to require/verify-full or set ALLOW_INSECURE_DB=1 to opt out", c.Storage.Host)
+	}
 	return nil
 }
 
@@ -282,11 +298,18 @@ func LoadFromEnv() (*Config, error) {
 			LogLevel: "info",
 			DataDir:  getEnv("DATA_DIR", "/var/lib/camera-brain"),
 			ModelDir: getEnv("MODEL_DIR", "/var/lib/camera-brain/models"),
+			NATSURL:  getEnv("NATS_URL", "nats://localhost:4222"),
 		},
 	}
 	return cfg, cfg.Validate()
 }
 
+// getEnv returns the env var value or defaultVal if the variable is unset OR
+// set to an empty string. An explicitly empty value (e.g. "DB_HOST=") is
+// intentionally treated as unset: empty env values are rarely meaningful and
+// treating them as unset simplifies operator workflows where variables are
+// cleared rather than unset. Use os.LookupEnv directly if you need to
+// distinguish "unset" from "set to empty".
 func getEnv(key, defaultVal string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -296,18 +319,24 @@ func getEnv(key, defaultVal string) string {
 
 func getEnvInt(key string, defaultVal int) int {
 	if v := os.Getenv(key); v != "" {
-		var val int
-		fmt.Sscanf(v, "%d", &val)
-		return val
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			slog.Warn("invalid integer env var, using default", "key", key, "value", v, "default", defaultVal, "error", err)
+			return defaultVal
+		}
+		return n
 	}
 	return defaultVal
 }
 
 func getEnvFloat(key string, defaultVal float32) float32 {
 	if v := os.Getenv(key); v != "" {
-		var val float32
-		fmt.Sscanf(v, "%f", &val)
-		return val
+		f, err := strconv.ParseFloat(v, 32)
+		if err != nil {
+			slog.Warn("invalid float env var, using default", "key", key, "value", v, "default", defaultVal, "error", err)
+			return defaultVal
+		}
+		return float32(f)
 	}
 	return defaultVal
 }

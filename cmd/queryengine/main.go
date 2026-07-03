@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"rock-cluster/config"
 	"rock-cluster/pkg/plugin"
 )
@@ -43,8 +43,13 @@ type QueryResponse struct {
 }
 
 // ParsedQuery represents a structured query extracted from natural language.
+// SQL is a parameterized template; Args are the bind values for $1, $2, ...
+// The template is a compile-time constant (never interpolates user input),
+// which is defense-in-depth against SQL injection even if keyword extraction
+// is later extended to surface user-supplied values.
 type ParsedQuery struct {
 	SQL        string            `json:"sql"`
+	Args       []any             `json:"args,omitempty"`
 	Params     map[string]interface{} `json:"params"`
 	TimeRange  TimeRange         `json:"time_range"`
 	EntityType string            `json:"entity_type"`
@@ -90,7 +95,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	parsed := parseQuery(req.Query)
 
-	results, err := s.executeQuery(parsed)
+	results, err := s.executeQuery(r.Context(), parsed)
 	if err != nil {
 		http.Error(w, "Execute query: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -114,15 +119,30 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleHealth handles GET /health.
+// handleHealth verifies DB connectivity before returning 200.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.db.PingContext(pingCtx); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": "db: " + err.Error()})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // Serve starts the HTTP server.
 func (s *Server) Serve(ctx context.Context) error {
-	server := &http.Server{Addr: fmt.Sprintf(":%d", s.port), Handler: s.mux, ReadTimeout: 30 * time.Second, WriteTimeout: 120 * time.Second}
+	server := &http.Server{
+		Addr:              fmt.Sprintf(":%d", s.port),
+		Handler:           s.mux,
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("Query Engine starting", "port", s.port)
@@ -134,24 +154,29 @@ func (s *Server) Serve(ctx context.Context) error {
 	return server.Shutdown(shutdownCtx)
 }
 
-// parseQuery converts natural language to SQL using pattern matching.
+// parseQuery converts natural language to a parameterized SQL template.
+// Ordering: truck is checked BEFORE the generic car/vehicle branch — without
+// this, "truck" would match the car/vehicle branch and the truck-specific SQL
+// would be unreachable dead code.
 func parseQuery(userQuery string) *ParsedQuery {
 	queryLower := strings.ToLower(userQuery)
-	if strings.Contains(queryLower, "person") {
-		return &ParsedQuery{SQL: "SELECT detected_at, camera_id, class_name, attributes FROM observations WHERE class_name ILIKE '%person%' AND detected_at >= NOW() - INTERVAL '24 hours'", EntityType: "person", TimeRange: TimeRange{"NOW() - INTERVAL '24 hours'", "NOW()"}, Filters: map[string]string{}}
+	if strings.Contains(queryLower, "truck") {
+		return &ParsedQuery{SQL: "SELECT detected_at, camera_id, class_name, attributes FROM observations WHERE class_name ILIKE $1 AND detected_at >= NOW() - INTERVAL '24 hours'", Args: []any{"%truck%"}, EntityType: "vehicle", TimeRange: TimeRange{"NOW() - INTERVAL '24 hours'", "NOW()"}, Filters: map[string]string{}}
 	}
 	if strings.Contains(queryLower, "car") || strings.Contains(queryLower, "vehicle") {
-		return &ParsedQuery{SQL: "SELECT detected_at, camera_id, class_name, attributes FROM observations WHERE (class_name ILIKE '%car%' OR class_name ILIKE '%truck%' OR class_name ILIKE '%bus%') AND detected_at >= NOW() - INTERVAL '24 hours'", EntityType: "vehicle", TimeRange: TimeRange{"NOW() - INTERVAL '24 hours'", "NOW()"}, Filters: map[string]string{}}
+		return &ParsedQuery{SQL: "SELECT detected_at, camera_id, class_name, attributes FROM observations WHERE (class_name ILIKE $1 OR class_name ILIKE $2 OR class_name ILIKE $3) AND detected_at >= NOW() - INTERVAL '24 hours'", Args: []any{"%car%", "%truck%", "%bus%"}, EntityType: "vehicle", TimeRange: TimeRange{"NOW() - INTERVAL '24 hours'", "NOW()"}, Filters: map[string]string{}}
 	}
-	if strings.Contains(queryLower, "truck") {
-		return &ParsedQuery{SQL: "SELECT detected_at, camera_id, class_name, attributes FROM observations WHERE class_name ILIKE '%truck%' AND detected_at >= NOW() - INTERVAL '24 hours'", EntityType: "vehicle", TimeRange: TimeRange{"NOW() - INTERVAL '24 hours'", "NOW()"}, Filters: map[string]string{}}
+	if strings.Contains(queryLower, "person") {
+		return &ParsedQuery{SQL: "SELECT detected_at, camera_id, class_name, attributes FROM observations WHERE class_name ILIKE $1 AND detected_at >= NOW() - INTERVAL '24 hours'", Args: []any{"%person%"}, EntityType: "person", TimeRange: TimeRange{"NOW() - INTERVAL '24 hours'", "NOW()"}, Filters: map[string]string{}}
 	}
 	return &ParsedQuery{SQL: "SELECT detected_at, camera_id, class_name, attributes FROM observations WHERE detected_at >= NOW() - INTERVAL '24 hours'", EntityType: "observation", TimeRange: TimeRange{"NOW() - INTERVAL '24 hours'", "NOW()"}, Filters: map[string]string{}}
 }
 
-// executeQuery runs the parsed query against the database.
-func (s *Server) executeQuery(parsed *ParsedQuery) ([]QueryResult, error) {
-	rows, err := s.db.Query(parsed.SQL)
+// executeQuery runs the parsed query against the database, honoring the
+// request context for cancellation/timeout. The defer handles rows cleanup;
+// no redundant explicit Close() is needed (sql.Rows.Close is idempotent).
+func (s *Server) executeQuery(ctx context.Context, parsed *ParsedQuery) ([]QueryResult, error) {
+	rows, err := s.db.QueryContext(ctx, parsed.SQL, parsed.Args...)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +219,6 @@ func (s *Server) executeQuery(parsed *ParsedQuery) ([]QueryResult, error) {
 	}
 
 	if err := rows.Err(); err != nil {
-		rows.Close()
 		return nil, err
 	}
 	return results, nil
@@ -238,13 +262,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", cfg.Storage.Host, cfg.Storage.Port, cfg.Storage.Username, cfg.Storage.Password, cfg.Storage.Database, cfg.Storage.SSLMode)
+	// pq.QuoteLiteral defensively escapes the password (install.sh generates
+	// alphanumeric-only passwords today).
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", cfg.Storage.Host, cfg.Storage.Port, cfg.Storage.Username, pq.QuoteLiteral(cfg.Storage.Password), cfg.Storage.Database, cfg.Storage.SSLMode)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		slog.Error("Failed to connect to database", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	// Bounded pool: prevents exhaustion of Postgres max_connections under load.
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
 
 	if err := db.Ping(); err != nil {
 		slog.Error("Database ping failed", "error", err)

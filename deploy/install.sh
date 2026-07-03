@@ -21,7 +21,7 @@ DATA_DIR="/var/lib/camera-brain"
 LOG_DIR="/var/log/camera-brain"
 BIN_DIR="${INSTALL_PREFIX}/bin"
 LLAMA_DIR="/opt/llama.cpp"
-USER="${SUDO_USER:-$(whoami)}"
+CB_USER="camera-brain"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Colors for output
@@ -132,8 +132,11 @@ setup_directories() {
 
     # Set permissions
     if [[ "$DRY_RUN" == "false" ]]; then
-        chown -R "$USER:$USER" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
-        chmod 755 "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+        chown -R "$CB_USER:$CB_USER" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+        chmod 755 "$DATA_DIR" "$LOG_DIR"
+        # Config dir contains DB_PASSWORD — restrict to owner only.
+        chmod 700 "$CONFIG_DIR"
+        chown "$CB_USER:$CB_USER" "$CONFIG_DIR" 2>/dev/null || true
     fi
 
     log_success "Directories created"
@@ -196,6 +199,12 @@ EOF
         fi
     fi
 
+    # Lock down the env file — it contains DB_PASSWORD.
+    if [[ "$DRY_RUN" == "false" ]]; then
+        chmod 600 "$config_file"
+        chown root:root "$config_file"
+    fi
+
     log_success "Configuration created at $config_file"
 }
 
@@ -252,19 +261,23 @@ build_go_services() {
     # Download dependencies
     run_or_echo go mod download
 
-    # Build services
-    local services=("vlm-processor" "query-engine" "gateway")
-    for service in "${services[@]}"; do
-        if [[ -d "$project_root/cmd/$service" ]]; then
-            log_info "Building $service..."
-            run_or_echo go build -o "$BIN_DIR/$service" "$project_root/cmd/$service"
+    # Build services — target names (hyphenated) differ from cmd/ dir names.
+    # Keep this mapping in sync with Makefile CMD_DIRS.
+    local targets=("vlm-processor" "query-engine" "gateway")
+    local dirs=("vlmprocessor" "queryengine" "gateway")
+    for i in "${!targets[@]}"; do
+        local service="${targets[$i]}"
+        local cmd_subdir="${dirs[$i]}"
+        if [[ -d "$project_root/cmd/$cmd_subdir" ]]; then
+            log_info "Building $service (cmd/$cmd_subdir)..."
+            run_or_echo go build -o "$BIN_DIR/$service" "$project_root/cmd/$cmd_subdir"
             if ! [[ -x "$BIN_DIR/$service" ]]; then
                 log_error "Build verification failed: $BIN_DIR/$service does not exist"
                 return 1
             fi
             log_success "Built: $BIN_DIR/$service"
         else
-            log_warning "Service source not found: cmd/$service"
+            log_warning "Service source not found: cmd/$cmd_subdir"
         fi
     done
 }
@@ -346,7 +359,7 @@ install_systemd_services() {
         # Substitute template variables
         local service_content
         service_content=$(cat "$template_path")
-        service_content="${service_content//\{\{USER\}\}/$USER}"
+        service_content="${service_content//\{\{USER\}\}/$CB_USER}"
         service_content="${service_content//\{\{PORT\}\}/${VLM_PROCESSOR_PORT:-8081}}"
         service_content="${service_content//\{\{BIN_DIR\}\}/$BIN_DIR}"
         service_content="${service_content//\{\{CONFIG_DIR\}\}/$CONFIG_DIR}"
@@ -368,14 +381,21 @@ install_systemd_services() {
 
         if [[ "$DRY_RUN" == "false" ]]; then
             echo "$service_content" > "$SYSTEMD_DIR/$output_file"
-            systemctl daemon-reload
-            systemctl enable "$output_file"
         else
             echo "[DRY-RUN] Would create: $SYSTEMD_DIR/$output_file"
         fi
 
         log_success "Installed: $output_file"
     done
+
+    # Reload systemd once after all units are written, not per-service.
+    if [[ "$DRY_RUN" == "false" ]]; then
+        systemctl daemon-reload
+        for service_def in "${services[@]}"; do
+            IFS=':' read -r _ output_file _ <<< "$service_def"
+            systemctl enable "$output_file" 2>/dev/null || true
+        done
+    fi
 }
 
 # ============================================================================
@@ -448,9 +468,30 @@ EOF
 # ============================================================================
 # Start Services
 # ============================================================================
+
+# Wait for a systemd service to reach active state, with timeout.
+wait_service_active() {
+    local service=$1
+    local timeout=${2:-60}
+    local elapsed=0
+    log_info "Waiting for $service to become active (timeout ${timeout}s)..."
+    while [[ $elapsed -lt $timeout ]]; do
+        if systemctl is-active --quiet "$service" 2>/dev/null; then
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+    log_error "$service did not become active within ${timeout}s"
+    return 1
+}
+
 start_services() {
     log_info "Starting services..."
 
+    # Ordered start with health-check waits so downstream services don't race
+    # ahead of upstream ones (e.g. vlmprocessor before llama-server has loaded
+    # its multi-GB model).
     local services=("llama-server.service" "vlm-processor.service" "query-engine.service" "camera-brain-gateway.service")
 
     for service in "${services[@]}"; do
@@ -462,6 +503,15 @@ start_services() {
             }
             systemctl enable "$service"
             log_success "Started: $service"
+            # Wait for upstream services before starting dependents.
+            case "$service" in
+                llama-server.service)
+                    wait_service_active "$service" 120 || return 1
+                    ;;
+                vlm-processor.service)
+                    wait_service_active "$service" 60 || return 1
+                    ;;
+            esac
         else
             echo "[DRY-RUN] Would start: $service"
         fi
@@ -529,6 +579,22 @@ do_uninstall() {
 }
 
 # ============================================================================
+# System User
+# ============================================================================
+ensure_system_user() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        return 0
+    fi
+    if ! getent group "$CB_USER" &>/dev/null; then
+        groupadd --system "$CB_USER"
+    fi
+    if ! id "$CB_USER" &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$CB_USER" "$CB_USER"
+    fi
+    log_success "System user '$CB_USER' ready"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 main() {
@@ -547,7 +613,14 @@ main() {
         exit 0
     fi
 
+    # Refuse to run without sudo unless dry-running.
+    if [[ "$DRY_RUN" == "false" && "${EUID:-$(id -u)}" -ne 0 ]]; then
+        log_error "Installer must be run as root (use sudo)"
+        exit 1
+    fi
+
     pre_install_checks
+    ensure_system_user
     setup_directories
     generate_config
     build_llama_cpp

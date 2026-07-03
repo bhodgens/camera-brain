@@ -44,8 +44,12 @@ static int read_file(const char* path, void** out_buf, size_t* out_size) {
     fseek(f, 0, SEEK_SET);
     void* buf = malloc(size);
     if (!buf) { fclose(f); return -1; }
-    fread(buf, 1, size, f);
+    size_t got = fread(buf, 1, size, f);
     fclose(f);
+    if (got != size) {
+        free(buf);
+        return -2;
+    }
     *out_buf = buf;
     *out_size = size;
     return 0;
@@ -58,6 +62,7 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/image/draw"
@@ -93,6 +98,7 @@ var pluginInfo = detection.PluginInfo{
 }
 
 type detector struct {
+	mu            sync.Mutex
 	ctx           C.rknn_context
 	modelPath     string
 	inputW        int
@@ -135,6 +141,14 @@ func (d *detector) Initialize(_ context.Context, cfg detection.Config) error {
 		return fmt.Errorf("rknn_query input attr: %d", ret)
 	}
 
+	// dims layout depends on attr.fmt. For NHWC the dims are [N, H, W, C],
+	// so dims[1]=H, dims[2]=W. NCHW would invert these and silently swap
+	// the preprocessing resize — corrupting every inference.
+	if attr.fmt != C.RKNN_TENSOR_NHWC {
+		C.rknn_destroy(d.ctx)
+		d.ctx = 0
+		return fmt.Errorf("unsupported input tensor format: expected NHWC, got %d (model must be converted with NHWC input layout)", int(attr.fmt))
+	}
 	d.inputW = int(attr.dims[2])
 	d.inputH = int(attr.dims[1])
 	d.modelPath = cfg.ModelPath
@@ -149,6 +163,13 @@ func (d *detector) Initialize(_ context.Context, cfg detection.Config) error {
 }
 
 func (d *detector) Detect(ctx context.Context, img image.Image) ([]detection.Detection, error) {
+	// RKNN contexts are single-tenant: rknn_inputs_set → rknn_run →
+	// rknn_outputs_get share state on the context handle. Concurrent
+	// calls would interleave inputs and outputs. Per PLUGIN-GUIDE #4
+	// we serialize the whole inference pipeline.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	preprocessed := d.preprocess(img)
 	if preprocessed == nil {
 		return nil, fmt.Errorf("preprocess failed")
@@ -172,10 +193,18 @@ func (d *detector) Detect(ctx context.Context, img image.Image) ([]detection.Det
 		return nil, fmt.Errorf("rknn_run failed: %d", ret)
 	}
 
-	var numOutputs C.uint32_t
-	ret = C.rknn_query(d.ctx, C.RKNN_QUERY_IN_OUT_NUM, &numOutputs, C.sizeof_uint32_t)
+	// RKNN_QUERY_IN_OUT_NUM populates a rknn_input_output_num struct
+	// (uint32_t n_input, uint32_t n_output) — see /tmp/rknn_api.h:269-275.
+	// Passing a 4-byte buffer reads only n_input and corrupts the next
+	// stack slot. Must pass the full 8-byte struct.
+	var ioNum C.rknn_input_output_num
+	ret = C.rknn_query(d.ctx, C.RKNN_QUERY_IN_OUT_NUM, unsafe.Pointer(&ioNum), C.sizeof_rknn_input_output_num)
 	if ret < 0 {
-		return nil, fmt.Errorf("rknn_query outputs: %d", ret)
+		return nil, fmt.Errorf("rknn_query in/out num: %d", ret)
+	}
+	numOutputs := uint32(ioNum.n_output)
+	if int(numOutputs) != len(yoloStrides) {
+		return nil, fmt.Errorf("model has %d outputs, expected %d (YOLOv5 stride heads)", numOutputs, len(yoloStrides))
 	}
 
 	outputs := make([]C.rknn_output, int(numOutputs))

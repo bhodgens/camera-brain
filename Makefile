@@ -1,8 +1,6 @@
 # Camera Brain Makefile
 # Build, test, and deployment automation
 
-.PHONY: help build clean test run-docker stop-docker clean-docker build-docker install build-cbrain install-dry-run
-
 # ============================================================================
 # Variables
 # ============================================================================
@@ -12,11 +10,18 @@ LDFLAGS := -ldflags="-w -s"
 CMD_DIR := cmd
 BIN_DIR := bin
 
-# Services
+# Services — mapping of build target name to cmd/ subdirectory.
+# Target names match the binary/output names and the historical hyphenated
+# service names; the cmd/ directories use concatenated lowercase instead.
 SERVICES := vlm-processor query-engine gateway
+
+# Map of build target -> cmd/ source directory.
+CMD_DIRS := vlm-processor:vlmprocessor query-engine:queryengine gateway:gateway
 
 # CLI Tool
 CBRAIN_BIN = cbrain
+
+.PHONY: help build clean test run-docker stop-docker clean-docker build-docker install build-cbrain install-dry-run $(SERVICES)
 
 # ============================================================================
 # Help
@@ -41,7 +46,9 @@ help:
 # ============================================================================
 $(SERVICES):
 	@echo "Building $@..."
-	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/$@ $(CMD_DIR)/$@
+	@cmd_subdir=$$(echo "$(CMD_DIRS)" | tr ' ' '\n' | grep '^$@:' | cut -d: -f2); \
+	if [ -z "$$cmd_subdir" ]; then echo "Error: no cmd dir mapping for $@"; exit 1; fi; \
+	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/$@ ./$(CMD_DIR)/$$cmd_subdir
 
 build: $(SERVICES) build-cbrain
 	@for svc in $(SERVICES); do \

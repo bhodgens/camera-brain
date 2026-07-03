@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 	"rock-cluster/config"
 )
@@ -110,24 +111,48 @@ func (r *WorkerRegistry) RegisterWorker(id string, cameraID *uuid.UUID) error {
 	return err
 }
 
-// ListWorkers returns all registered workers.
-func (r *WorkerRegistry) ListWorkers() []*Worker {
+// ListWorkers returns a deep copy of all registered workers as values.
+// Returning values (not pointers) under the read lock prevents data races
+// between the NATS heartbeat goroutine (which mutates the stored *Worker
+// structs) and HTTP handlers that iterate and JSON-encode the result.
+func (r *WorkerRegistry) ListWorkers() []Worker {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	workers := make([]*Worker, 0, len(r.workers))
+	workers := make([]Worker, 0, len(r.workers))
 	for _, w := range r.workers {
-		workers = append(workers, w)
+		cp := *w
+		if w.CurrentCamera != nil {
+			cam := *w.CurrentCamera
+			cp.CurrentCamera = &cam
+		}
+		if w.AssignedAt != nil {
+			ts := *w.AssignedAt
+			cp.AssignedAt = &ts
+		}
+		workers = append(workers, cp)
 	}
 	return workers
 }
 
-// GetWorker returns a specific worker by ID.
-func (r *WorkerRegistry) GetWorker(id string) (*Worker, bool) {
+// GetWorker returns a deep copy of a specific worker by ID.
+func (r *WorkerRegistry) GetWorker(id string) (Worker, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	w, ok := r.workers[id]
-	return w, ok
+	if !ok {
+		return Worker{}, false
+	}
+	cp := *w
+	if w.CurrentCamera != nil {
+		cam := *w.CurrentCamera
+		cp.CurrentCamera = &cam
+	}
+	if w.AssignedAt != nil {
+		ts := *w.AssignedAt
+		cp.AssignedAt = &ts
+	}
+	return cp, true
 }
 
 // AssignCamera assigns a camera to a worker via NATS.
@@ -160,8 +185,23 @@ func NewServer(db *sql.DB, nc *nats.Conn, registry *WorkerRegistry, port int, un
 	return s
 }
 
-// handleHealth handles GET /health.
+// handleHealth verifies dependencies (DB + NATS) before returning 200.
+// Returns 503 if any dependency is unhealthy.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.db.PingContext(pingCtx); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": "db: " + err.Error()})
+		return
+	}
+	if !s.nats.IsConnected() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": "nats disconnected"})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
 		slog.Warn("Failed to encode health response", "error", err)
@@ -289,10 +329,12 @@ func (s *Server) registerCamera(cam *Camera) error {
 // Serve starts the HTTP server.
 func (s *Server) Serve(ctx context.Context) error {
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", s.port),
-		Handler:      s.mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		Addr:              fmt.Sprintf(":%d", s.port),
+		Handler:           s.mux,
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -308,9 +350,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	return server.Shutdown(shutdownCtx)
 }
 
-// listenHeartbeats subscribes to worker heartbeats and returns an unsubscribe function.
+// listenHeartbeats subscribes to worker heartbeats and returns an
+// unsubscribe function that detaches the subscription from NATS.
 func listenHeartbeats(nc *nats.Conn, registry *WorkerRegistry) (func(), error) {
-	_, err := nc.Subscribe("workers.heartbeat.>", func(msg *nats.Msg) {
+	sub, err := nc.Subscribe("workers.heartbeat.>", func(msg *nats.Msg) {
 		var hb struct {
 			WorkerID  string `json:"worker_id"`
 			CameraID  string `json:"camera_id"`
@@ -336,8 +379,7 @@ func listenHeartbeats(nc *nats.Conn, registry *WorkerRegistry) (func(), error) {
 		return nil, err
 	}
 	return func() {
-		// NATS subscription cleanup is handled by nc.Close() in main,
-		// but we return the function signature for consistency.
+		_ = sub.Unsubscribe()
 	}, nil
 }
 
@@ -349,10 +391,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Connect to database
+	// Connect to database. pq.QuoteLiteral defensively escapes the password
+	// (install.sh generates alphanumeric-only passwords today).
 	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Storage.Host, cfg.Storage.Port, cfg.Storage.Username,
-		cfg.Storage.Password, cfg.Storage.Database, cfg.Storage.SSLMode)
+		pq.QuoteLiteral(cfg.Storage.Password), cfg.Storage.Database, cfg.Storage.SSLMode)
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
@@ -361,15 +404,20 @@ func main() {
 	}
 	defer db.Close()
 
+	// Bounded pool: prevents exhaustion of Postgres max_connections under load.
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+
 	if err := db.Ping(); err != nil {
 		slog.Error("Database ping failed", "error", err)
 		os.Exit(1)
 	}
 
-	// Connect to NATS
-	nc, err := nats.Connect(nats.DefaultURL)
+	// Connect to NATS. NATS_URL env var allows non-co-located deployments.
+	nc, err := nats.Connect(cfg.Service.NATSURL)
 	if err != nil {
-		slog.Error("Failed to connect to NATS", "error", err)
+		slog.Error("Failed to connect to NATS", "error", err, "url", cfg.Service.NATSURL)
 		os.Exit(1)
 	}
 	defer nc.Close()
