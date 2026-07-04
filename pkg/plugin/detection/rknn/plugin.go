@@ -203,8 +203,9 @@ func (d *detector) Detect(ctx context.Context, img image.Image) ([]detection.Det
 		return nil, fmt.Errorf("rknn_query in/out num: %d", ret)
 	}
 	numOutputs := uint32(ioNum.n_output)
-	if int(numOutputs) != len(yoloStrides) {
-		return nil, fmt.Errorf("model has %d outputs, expected %d (YOLOv5 stride heads)", numOutputs, len(yoloStrides))
+	// Allow both 1 (concatenated) and 3 (separate) outputs for YOLOv5 models
+	if numOutputs != 1 && int(numOutputs) != len(yoloStrides) {
+		return nil, fmt.Errorf("model has %d outputs, expected 1 (concatenated) or 3 (separate stride heads)", numOutputs)
 	}
 
 	outputs := make([]C.rknn_output, int(numOutputs))
@@ -262,59 +263,128 @@ type yoloDet struct {
 func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detection {
 	var allDets []yoloDet
 
-	for outIdx, output := range outputs {
-		stride := yoloStrides[outIdx]
-		gridSize := yoloInputSize / stride
-		outputSize := int(output.size)
-		if outputSize == 0 {
-			continue
-		}
+	// Check if we have a single concatenated output (2,142,000 bytes = all 3 strides combined)
+	// This happens when the RKNN model exports a single tensor instead of 3 separate stride heads
+	if len(outputs) == 1 && outputs[0].size == 2142000 {
+		// Single concatenated output - split into 3 stride regions
+		// stride 8: 80x80x3x85 = 1,632,000 bytes (offset 0)
+		// stride 16: 40x40x3x85 = 408,000 bytes (offset 1,632,000)
+		// stride 32: 20x20x3x85 = 102,000 bytes (offset 2,040,000)
+		strideOffsets := []int{0, 1632000, 2040000}
+		gridSizes := []int{80, 40, 20}
 
-		data := (*[1 << 30]int8)(output.buf)[:outputSize:outputSize]
+		data := (*[1 << 30]int8)(outputs[0].buf)[:2142000:2142000]
 
-		for anchorIdx := 0; anchorIdx < 3; anchorIdx++ {
-			for gy := 0; gy < gridSize; gy++ {
-				for gx := 0; gx < gridSize; gx++ {
-					baseIdx := ((gy*gridSize*3+anchorIdx)*gridSize + gx) * 85
-					if baseIdx+84 >= len(data) {
-						continue
-					}
+		for outIdx := 0; outIdx < 3; outIdx++ {
+			stride := yoloStrides[outIdx]
+			gridSize := gridSizes[outIdx]
+			numAnchors := 3
+			offset := strideOffsets[outIdx]
 
-					boxConf := float32(data[baseIdx+4]) / 128.0
-					if boxConf < d.confThreshold {
-						continue
-					}
-
-					bestClass := 0
-					bestScore := float32(0)
-					for c := 0; c < yoloNumClasses; c++ {
-						score := float32(data[baseIdx+5+c]) / 128.0 * boxConf
-						if score > bestScore {
-							bestScore = score
-							bestClass = c
+			for anchorIdx := 0; anchorIdx < numAnchors; anchorIdx++ {
+				for gy := 0; gy < gridSize; gy++ {
+					for gx := 0; gx < gridSize; gx++ {
+						baseIdx := offset + ((gy*gridSize+gx)*numAnchors+anchorIdx)*85
+						if baseIdx+84 >= len(data) {
+							continue
 						}
+
+						boxConf := float32(data[baseIdx+4]) / 128.0
+						if boxConf < d.confThreshold {
+							continue
+						}
+
+						bestClass := 0
+						bestScore := float32(0)
+						for c := 0; c < yoloNumClasses; c++ {
+							score := float32(data[baseIdx+5+c]) / 128.0 * boxConf
+							if score > bestScore {
+								bestScore = score
+								bestClass = c
+							}
+						}
+
+						if bestScore < d.confThreshold {
+							continue
+						}
+
+						x := float32(gx) + float32(data[baseIdx])/128.0
+						y := float32(gy) + float32(data[baseIdx+1])/128.0
+						w := float32(yoloAnchors[outIdx*3+anchorIdx][0]) * float32(math.Exp(float64(data[baseIdx+2])/128.0))
+						h := float32(yoloAnchors[outIdx*3+anchorIdx][1]) * float32(math.Exp(float64(data[baseIdx+3])/128.0))
+
+						x1 := int((x - w/2) * float32(stride))
+						y1 := int((y - h/2) * float32(stride))
+						x2 := int((x + w/2) * float32(stride))
+						y2 := int((y + h/2) * float32(stride))
+
+						x1 = clampInt(x1, 0, yoloInputSize)
+						y1 = clampInt(y1, 0, yoloInputSize)
+						x2 = clampInt(x2, 0, yoloInputSize)
+						y2 = clampInt(y2, 0, yoloInputSize)
+
+						allDets = append(allDets, yoloDet{confidence: bestScore, classID: bestClass, x1: x1, y1: y1, x2: x2, y2: y2})
 					}
+				}
+			}
+		}
+	} else {
+		// Multiple separate outputs (original logic)
+		for outIdx, output := range outputs {
+			stride := yoloStrides[outIdx]
+			gridSize := yoloInputSize / stride
+			outputSize := int(output.size)
+			if outputSize == 0 {
+				continue
+			}
 
-					if bestScore < d.confThreshold {
-						continue
+			data := (*[1 << 30]int8)(output.buf)[:outputSize:outputSize]
+			numAnchors := 3
+
+			for anchorIdx := 0; anchorIdx < numAnchors; anchorIdx++ {
+				for gy := 0; gy < gridSize; gy++ {
+					for gx := 0; gx < gridSize; gx++ {
+						baseIdx := ((gy*gridSize+gx)*numAnchors+anchorIdx)*85
+						if baseIdx+84 >= len(data) {
+							continue
+						}
+
+						boxConf := float32(data[baseIdx+4]) / 128.0
+						if boxConf < d.confThreshold {
+							continue
+						}
+
+						bestClass := 0
+						bestScore := float32(0)
+						for c := 0; c < yoloNumClasses; c++ {
+							score := float32(data[baseIdx+5+c]) / 128.0 * boxConf
+							if score > bestScore {
+								bestScore = score
+								bestClass = c
+							}
+						}
+
+						if bestScore < d.confThreshold {
+							continue
+						}
+
+						x := float32(gx) + float32(data[baseIdx])/128.0
+						y := float32(gy) + float32(data[baseIdx+1])/128.0
+						w := float32(yoloAnchors[outIdx*3+anchorIdx][0]) * float32(math.Exp(float64(data[baseIdx+2])/128.0))
+						h := float32(yoloAnchors[outIdx*3+anchorIdx][1]) * float32(math.Exp(float64(data[baseIdx+3])/128.0))
+
+						x1 := int((x - w/2) * float32(stride))
+						y1 := int((y - h/2) * float32(stride))
+						x2 := int((x + w/2) * float32(stride))
+						y2 := int((y + h/2) * float32(stride))
+
+						x1 = clampInt(x1, 0, yoloInputSize)
+						y1 = clampInt(y1, 0, yoloInputSize)
+						x2 = clampInt(x2, 0, yoloInputSize)
+						y2 = clampInt(y2, 0, yoloInputSize)
+
+						allDets = append(allDets, yoloDet{confidence: bestScore, classID: bestClass, x1: x1, y1: y1, x2: x2, y2: y2})
 					}
-
-					x := float32(gx) + float32(data[baseIdx])/128.0
-					y := float32(gy) + float32(data[baseIdx+1])/128.0
-					w := float32(yoloAnchors[outIdx*3+anchorIdx][0]) * float32(math.Exp(float64(data[baseIdx+2])/128.0))
-					h := float32(yoloAnchors[outIdx*3+anchorIdx][1]) * float32(math.Exp(float64(data[baseIdx+3])/128.0))
-
-					x1 := int((x - w/2) * float32(stride))
-					y1 := int((y - h/2) * float32(stride))
-					x2 := int((x + w/2) * float32(stride))
-					y2 := int((y + h/2) * float32(stride))
-
-					x1 = clampInt(x1, 0, yoloInputSize)
-					y1 = clampInt(y1, 0, yoloInputSize)
-					x2 = clampInt(x2, 0, yoloInputSize)
-					y2 = clampInt(y2, 0, yoloInputSize)
-
-					allDets = append(allDets, yoloDet{confidence: bestScore, classID: bestClass, x1: x1, y1: y1, x2: x2, y2: y2})
 				}
 			}
 		}
