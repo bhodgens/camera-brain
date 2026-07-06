@@ -210,7 +210,7 @@ func (d *detector) Detect(ctx context.Context, img image.Image) ([]detection.Det
 
 	outputs := make([]C.rknn_output, int(numOutputs))
 	for i := range outputs {
-		outputs[i].want_float = 0
+		outputs[i].want_float = 1 // Request float32 output, not int8
 		outputs[i].is_prealloc = 0
 	}
 
@@ -273,13 +273,15 @@ func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detect
 		strideOffsets := []int{0, 1632000, 2040000}
 		gridSizes := []int{80, 40, 20}
 
-		data := (*[1 << 30]int8)(outputs[0].buf)[:2142000:2142000]
+		// Try float32 first - YOLOv5 outputs are typically float32, not int8
+		data := (*[1 << 30]float32)(outputs[0].buf)[:535500:535500]
 
 		for outIdx := 0; outIdx < 3; outIdx++ {
 			stride := yoloStrides[outIdx]
 			gridSize := gridSizes[outIdx]
 			numAnchors := 3
-			offset := strideOffsets[outIdx]
+			// Convert byte offset to float32 element offset
+			offset := strideOffsets[outIdx] / 4
 
 			for anchorIdx := 0; anchorIdx < numAnchors; anchorIdx++ {
 				for gy := 0; gy < gridSize; gy++ {
@@ -289,7 +291,28 @@ func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detect
 							continue
 						}
 
-						boxConf := float32(data[baseIdx+4]) / 128.0
+						// YOLOv5 outputs after RKNN: values typically already decoded to 0-640 pixel space
+						// But check if values are normalized (0-1) by looking at magnitude
+						cx := data[baseIdx]
+						cy := data[baseIdx+1]
+						w := data[baseIdx+2]
+						h := data[baseIdx+3]
+						boxConf := data[baseIdx+4]
+
+						// If cx is < 1, values are normalized - apply sigmoid and grid offset
+						if cx < 1.0 && cx > 0.0 {
+							// Standard YOLO decoding: apply sigmoid to box centers
+							cx = float32(gx) + 1.0/(1.0+float32(math.Exp(-float64(cx))))
+							cy = float32(gy) + 1.0/(1.0+float32(math.Exp(-float64(cy))))
+							w = float32(yoloAnchors[outIdx*3+anchorIdx][0]) * float32(math.Exp(float64(w)))
+							h = float32(yoloAnchors[outIdx*3+anchorIdx][1]) * float32(math.Exp(float64(h)))
+							// Scale to pixel coordinates
+							cx *= float32(stride)
+							cy *= float32(stride)
+							w *= float32(stride)
+							h *= float32(stride)
+						}
+
 						if boxConf < d.confThreshold {
 							continue
 						}
@@ -297,7 +320,7 @@ func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detect
 						bestClass := 0
 						bestScore := float32(0)
 						for c := 0; c < yoloNumClasses; c++ {
-							score := float32(data[baseIdx+5+c]) / 128.0 * boxConf
+							score := data[baseIdx+5+c] * boxConf
 							if score > bestScore {
 								bestScore = score
 								bestClass = c
@@ -308,15 +331,10 @@ func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detect
 							continue
 						}
 
-						x := float32(gx) + float32(data[baseIdx])/128.0
-						y := float32(gy) + float32(data[baseIdx+1])/128.0
-						w := float32(yoloAnchors[outIdx*3+anchorIdx][0]) * float32(math.Exp(float64(data[baseIdx+2])/128.0))
-						h := float32(yoloAnchors[outIdx*3+anchorIdx][1]) * float32(math.Exp(float64(data[baseIdx+3])/128.0))
-
-						x1 := int((x - w/2) * float32(stride))
-						y1 := int((y - h/2) * float32(stride))
-						x2 := int((x + w/2) * float32(stride))
-						y2 := int((y + h/2) * float32(stride))
+						x1 := int(cx - w/2)
+						y1 := int(cy - h/2)
+						x2 := int(cx + w/2)
+						y2 := int(cy + h/2)
 
 						x1 = clampInt(x1, 0, yoloInputSize)
 						y1 = clampInt(y1, 0, yoloInputSize)
@@ -338,7 +356,8 @@ func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detect
 				continue
 			}
 
-			data := (*[1 << 30]int8)(output.buf)[:outputSize:outputSize]
+			// Read as float32 instead of int8
+			data := (*[1 << 30]float32)(output.buf)[:outputSize/4:outputSize/4]
 			numAnchors := 3
 
 			for anchorIdx := 0; anchorIdx < numAnchors; anchorIdx++ {
@@ -349,7 +368,24 @@ func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detect
 							continue
 						}
 
-						boxConf := float32(data[baseIdx+4]) / 128.0
+						cx := data[baseIdx]
+						cy := data[baseIdx+1]
+						w := data[baseIdx+2]
+						h := data[baseIdx+3]
+						boxConf := data[baseIdx+4]
+
+						// If cx < 1, values are normalized - apply sigmoid and grid offset
+						if cx < 1.0 && cx > 0.0 {
+							cx = float32(gx) + 1.0/(1.0+float32(math.Exp(-float64(cx))))
+							cy = float32(gy) + 1.0/(1.0+float32(math.Exp(-float64(cy))))
+							w = float32(yoloAnchors[outIdx*3+anchorIdx][0]) * float32(math.Exp(float64(w)))
+							h = float32(yoloAnchors[outIdx*3+anchorIdx][1]) * float32(math.Exp(float64(h)))
+							cx *= float32(stride)
+							cy *= float32(stride)
+							w *= float32(stride)
+							h *= float32(stride)
+						}
+
 						if boxConf < d.confThreshold {
 							continue
 						}
@@ -357,7 +393,7 @@ func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detect
 						bestClass := 0
 						bestScore := float32(0)
 						for c := 0; c < yoloNumClasses; c++ {
-							score := float32(data[baseIdx+5+c]) / 128.0 * boxConf
+							score := data[baseIdx+5+c] * boxConf
 							if score > bestScore {
 								bestScore = score
 								bestClass = c
@@ -368,15 +404,10 @@ func (d *detector) parseYOLOv5Output(outputs []C.rknn_output) []detection.Detect
 							continue
 						}
 
-						x := float32(gx) + float32(data[baseIdx])/128.0
-						y := float32(gy) + float32(data[baseIdx+1])/128.0
-						w := float32(yoloAnchors[outIdx*3+anchorIdx][0]) * float32(math.Exp(float64(data[baseIdx+2])/128.0))
-						h := float32(yoloAnchors[outIdx*3+anchorIdx][1]) * float32(math.Exp(float64(data[baseIdx+3])/128.0))
-
-						x1 := int((x - w/2) * float32(stride))
-						y1 := int((y - h/2) * float32(stride))
-						x2 := int((x + w/2) * float32(stride))
-						y2 := int((y + h/2) * float32(stride))
+						x1 := int(cx - w/2)
+						y1 := int(cy - h/2)
+						x2 := int(cx + w/2)
+						y2 := int(cy + h/2)
 
 						x1 = clampInt(x1, 0, yoloInputSize)
 						y1 = clampInt(y1, 0, yoloInputSize)

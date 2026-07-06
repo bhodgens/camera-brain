@@ -157,9 +157,18 @@ func (r *WorkerRegistry) GetWorker(id string) (Worker, bool) {
 
 // AssignCamera assigns a camera to a worker via NATS.
 func (r *WorkerRegistry) AssignCamera(workerID string, cameraID uuid.UUID) error {
+	// Fetch camera details from database
+	var rtspURL, location string
+	err := r.db.QueryRow(`SELECT rtsp_url, location FROM cameras WHERE id = $1`, cameraID).Scan(&rtspURL, &location)
+	if err != nil {
+		return fmt.Errorf("fetch camera: %w", err)
+	}
+
 	msg := map[string]interface{}{
-		"camera_id": cameraID.String(),
-		"action":    "assign",
+		"camera_id":  cameraID.String(),
+		"rtsp_url":   rtspURL,
+		"location":   location,
+		"assigned_at": time.Now().Format(time.RFC3339),
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
