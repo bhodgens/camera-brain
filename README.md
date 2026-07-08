@@ -8,6 +8,17 @@ It's a proof of concept of what is trivially straightforward, with minimal resou
 
 ## Example
 
+### Web Chat Interface
+
+Access the web interface at `http://rock0:8080` to chat with your camera observations:
+
+- "Show me all people detected today"
+- "How many cars were detected yesterday?"
+- "What detections occurred on camera cam4?"
+- "Show me high confidence detections above 0.8"
+
+The chat interface uses LFM2.5-1.2B-Instruct to convert natural language to SQL queries.
+
 ### CLI Queries with cbrain
 
 ```bash
@@ -142,6 +153,7 @@ systemctl status camera-brain-*
 | Service | Port | Purpose |
 |---------|------|---------|
 | Gateway | 8080 | Worker coordination, HTTP API |
+| Chat Web UI | 8080 | Natural language chat interface (Flask) |
 | VLM Processor | 8081 | Image analysis via VLM |
 | Query Engine | 8082 | Natural language queries |
 | llama-server | 8888 | VLM inference (LFM2.5-VL-1.6B) |
@@ -195,6 +207,81 @@ analysis:
 ```
 
 See [docs/PLUGIN-GUIDE.md](docs/PLUGIN-GUIDE.md) for creating custom plugins.
+
+## Chat Interface
+
+The web-based chat interface allows natural language querying of camera observations:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Browser                               │
+│              http://rock0:8080                           │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │  "Show me all cars detected today"                  │ │
+│  │                                                     │ │
+│  │  Found 23 car detections today.                     │ │
+│  │  SELECT * FROM observations WHERE class_name=...    │ │
+│  └────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+              ┌─────────────────────────┐
+              │   Flask App (8080)      │
+              │   - Natural language    │
+              │     → SQL (LFM 1.2B)    │
+              │   - SQL validation      │
+              │   - Query execution     │
+              └───────────┬─────────────┘
+                          │
+        ┌─────────────────┼─────────────────┐
+        │                 │                 │
+        ▼                 ▼                 ▼
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│  llama-server│  │   SQLite     │  │   Results    │
+│  (8889)      │  │   Database   │  │   Display    │
+│  LFM2.5-1.2B │  │   camera-    │  │              │
+│              │  │   brain.db   │  │              │
+└──────────────┘  └──────────────┘  └──────────────┘
+```
+
+### Deployment
+
+```bash
+# Deploy to rock0
+cd /Users/caimlas/git/rock-cluster
+./deploy/chat-service.sh
+```
+
+The deployment script:
+1. Creates Python virtual environment
+2. Installs Flask and dependencies
+3. Copies application to rock0
+4. Installs systemd service
+5. Starts the chat service
+
+**Access:** `http://rock0:8080`
+
+**Logs:** `ssh rock0 'sudo journalctl -u camera-brain-chat -f'`
+
+### Configuration
+
+Environment variables (set in systemd service):
+
+```bash
+DB_PATH=/home/camera-brain/camera-brain.db
+LLAMA_SERVER_URL=http://localhost:8889
+MODEL_PATH=/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q4_K_M.gguf
+```
+
+### Example Queries
+
+```
+- "Show me all people detected today"
+- "How many trucks were detected this week?"
+- "What detections occurred on camera cam4?"
+- "Show high confidence detections above 0.8"
+- "Find all bicycles detected between 6am and 8am"
+```
 
 ## Model Downloads
 

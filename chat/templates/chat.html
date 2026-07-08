@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Brain Chat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #0f1419;
+            color: #e7e9ea;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            width: 100%;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+
+        header {
+            padding: 20px 0;
+            border-bottom: 1px solid #2f3336;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #1d9bf0;
+        }
+
+        .status {
+            font-size: 0.85rem;
+            color: #71767b;
+            margin-top: 8px;
+        }
+
+        .status span {
+            color: #00ba7c;
+        }
+
+        #chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: #16181c;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+
+        .message {
+            margin-bottom: 20px;
+            padding: 16px;
+            border-radius: 8px;
+            line-height: 1.5;
+        }
+
+        .message.user {
+            background: #1d9bf0;
+            color: white;
+            margin-left: 20%;
+        }
+
+        .message.assistant {
+            background: #2f3336;
+            margin-right: 20%;
+        }
+
+        .message .sql {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.8rem;
+            background: #16181c;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-top: 10px;
+            color: #1d9bf0;
+            overflow-x: auto;
+        }
+
+        .message.error {
+            background: #f4212e20;
+            border: 1px solid #f4212e;
+            color: #f4212e;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            font-size: 0.85rem;
+        }
+
+        .results-table th,
+        .results-table td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #2f3336;
+        }
+
+        .results-table th {
+            color: #71767b;
+            font-weight: 500;
+        }
+
+        .results-table tr:hover {
+            background: #2f3336;
+        }
+
+        .input-area {
+            display: flex;
+            gap: 12px;
+            padding: 16px;
+            background: #16181c;
+            border-radius: 12px;
+        }
+
+        #question-input {
+            flex: 1;
+            padding: 14px 18px;
+            border: 1px solid #2f3336;
+            border-radius: 8px;
+            background: #0f1419;
+            color: #e7e9ea;
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        #question-input:focus {
+            border-color: #1d9bf0;
+        }
+
+        #question-input::placeholder {
+            color: #71767b;
+        }
+
+        #send-btn {
+            padding: 14px 28px;
+            background: #1d9bf0;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        #send-btn:hover {
+            background: #1a8cd8;
+        }
+
+        #send-btn:disabled {
+            background: #2f3336;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #2f3336;
+            border-top-color: #1d9bf0;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .result-count {
+            font-size: 0.8rem;
+            color: #71767b;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Camera Brain Chat</h1>
+            <div class="status" id="status">Checking status...</div>
+        </header>
+
+        <div id="chat-container"></div>
+
+        <div class="input-area">
+            <input
+                type="text"
+                id="question-input"
+                placeholder="Ask about camera observations (e.g., 'Show me all cars detected today')"
+                autofocus
+            >
+            <button id="send-btn">Send</button>
+        </div>
+    </div>
+
+    <script>
+        const chatContainer = document.getElementById('chat-container');
+        const questionInput = document.getElementById('question-input');
+        const sendBtn = document.getElementById('send-btn');
+        const statusEl = document.getElementById('status');
+
+        // Check system status
+        async function checkStatus() {
+            try {
+                const res = await fetch('/health');
+                const data = await res.json();
+                statusEl.innerHTML = `LLM: <span>${data.llama_server}</span> | DB: <span>${data.db}</span>`;
+            } catch (e) {
+                statusEl.innerHTML = `Error: ${e.message}`;
+            }
+        }
+        checkStatus();
+
+        // Add message to chat
+        function addMessage(content, type, sql = null, results = null) {
+            const msg = document.createElement('div');
+            msg.className = `message ${type}`;
+
+            let html = `<div>${content}</div>`;
+
+            if (sql) {
+                html += `<div class="sql">${escapeHtml(sql)}</div>`;
+            }
+
+            if (results && results.length > 0) {
+                html += renderResults(results);
+            }
+
+            msg.innerHTML = html;
+            chatContainer.appendChild(msg);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // Render results table
+        function renderResults(results) {
+            if (!results || results.length === 0) return '';
+
+            const columns = Object.keys(results[0]);
+            let html = '<table class="results-table"><thead><tr>';
+
+            columns.forEach(col => {
+                html += `<th>${escapeHtml(col)}</th>`;
+            });
+
+            html += '</tr></thead><tbody>';
+
+            results.slice(0, 10).forEach(row => {
+                html += '<tr>';
+                columns.forEach(col => {
+                    let val = row[col];
+                    if (typeof val === 'object') {
+                        val = JSON.stringify(val);
+                    }
+                    html += `<td>${escapeHtml(String(val))}</td>`;
+                });
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            if (results.length > 10) {
+                html += `<div class="result-count">Showing 10 of ${results.length} results</div>`;
+            }
+
+            return html;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Send question
+        async function sendQuestion() {
+            const question = questionInput.value.trim();
+            if (!question) return;
+
+            questionInput.value = '';
+            sendBtn.disabled = true;
+            sendBtn.innerHTML = '<span class="loading"></span>';
+
+            addMessage(question, 'user');
+
+            try {
+                const res = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question })
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    addMessage(data.error || 'Request failed', 'error');
+                } else {
+                    addMessage(data.answer, 'assistant', data.sql, data.results);
+                }
+            } catch (e) {
+                addMessage(`Error: ${e.message}`, 'error');
+            }
+
+            sendBtn.disabled = false;
+            sendBtn.textContent = 'Send';
+            questionInput.focus();
+        }
+
+        // Event listeners
+        sendBtn.addEventListener('click', sendQuestion);
+
+        questionInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendQuestion();
+            }
+        });
+    </script>
+</body>
+</html>

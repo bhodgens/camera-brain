@@ -1,0 +1,22 @@
+[Unit]
+Description=Camera Brain Chat Web Interface
+After=network.target llama-server.service
+
+[Service]
+Type=simple
+User=camera-brain
+WorkingDirectory=/home/camera-brain
+Environment="PATH=/home/camera-brain/chat-env/bin:/usr/bin:/bin"
+Environment="DB_PATH=/home/camera-brain/camera-brain.db"
+Environment="LLAMA_SERVER_URL=http://localhost:8889"
+Environment="MODEL_PATH=/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q4_K_M.gguf"
+ExecStart=/home/camera-brain/chat-env/bin/python /home/camera-brain/chat/app.py
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
