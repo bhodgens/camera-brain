@@ -8,9 +8,13 @@ User=root
 Group=root
 WorkingDirectory=/home/camera-brain
 Environment="PATH=/home/camera-brain/chat-env/bin:/usr/bin:/bin"
-Environment="DB_PATH=/home/camera-brain/camera-brain.db"
+Environment="DB_HOST=172.18.0.2"
+Environment="DB_PORT=5432"
+Environment="DB_NAME=camera_brain"
+Environment="DB_USER=camera_brain"
+Environment="DB_PASSWORD=camera_brain"
 Environment="LLAMA_SERVER_URL=http://localhost:8889"
-Environment="MODEL_PATH=/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q4_K_M.gguf"
+Environment="MODEL_PATH=/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q8_0.gguf"
 Environment="PORT=8083"
 ExecStart=/home/camera-brain/chat-env/bin/python /home/camera-brain/chat/app.py
 Restart=on-failure

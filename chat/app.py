@@ -6,15 +6,26 @@ Uses LFM2.5-1.2B-Instruct for natural language to SQL translation.
 
 import os
 import json
-import sqlite3
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify
 
+try:
+    import psycopg2
+    DB_TYPE = "postgresql"
+except ImportError:
+    import sqlite3
+    DB_TYPE = "sqlite"
+
 app = Flask(__name__)
 
 # Configuration
-DB_PATH = os.getenv("DB_PATH", "/home/camera-brain/camera-brain.db")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "camera_brain")
+DB_USER = os.getenv("DB_USER", "camera_brain")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "camera_brain")
+DB_PATH = os.getenv("DB_PATH", "/home/camera-brain/camera-brain.db")  # SQLite fallback
 LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8889")
 MODEL_PATH = os.getenv("MODEL_PATH", "/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q4_K_M.gguf")
 
@@ -32,18 +43,18 @@ The 'bbox' column is JSON: [x1, y1, x2, y2]
 SYSTEM_PROMPT = f"""You are a SQL query generator for a camera surveillance database.
 {SCHEMA_CONTEXT}
 
-Convert the user's natural language question into a SQLite SELECT query.
+Convert the user's natural language question into a PostgreSQL SELECT query.
 - Only generate SELECT queries (no INSERT, UPDATE, DELETE, DROP)
-- Use strftime for date filtering: strftime('%Y-%m-%d', detected_at) = '2026-07-08'
+- Use DATE() for date filtering: DATE(detected_at) = '2026-07-08'
 - Use LIMIT to restrict results (max 100)
 - Return ONLY the SQL query, no explanation
 
 Examples:
 Q: "Show me all people detected today"
-A: SELECT * FROM observations WHERE class_name='person' AND strftime('%Y-%m-%d', detected_at)='2026-07-08' LIMIT 50
+A: SELECT * FROM observations WHERE class_name='person' AND DATE(detected_at)='2026-07-08' LIMIT 50
 
 Q: "How many cars were detected yesterday?"
-A: SELECT count(*) FROM observations WHERE class_name IN ('car', 'truck', 'bus') AND strftime('%Y-%m-%d', detected_at)='2026-07-07'
+A: SELECT count(*) FROM observations WHERE class_name IN ('car', 'truck', 'bus') AND DATE(detected_at)='2026-07-07'
 
 Q: "What detections occurred on camera cam4?"
 A: SELECT * FROM observations WHERE camera_id='cam4' ORDER BY detected_at DESC LIMIT 50
@@ -54,10 +65,21 @@ A: SELECT * FROM observations WHERE confidence > 0.8 ORDER BY detected_at DESC L
 
 
 def get_db_connection():
-    """Connect to SQLite database."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Connect to database (PostgreSQL or SQLite)."""
+    if DB_TYPE == "postgresql":
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD
+        )
+        conn.autocommit = True
+        return conn
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 
 def generate_sql_query(question: str) -> str:
@@ -117,7 +139,7 @@ def execute_query(sql: str) -> tuple[list, list]:
         cursor = conn.cursor()
         cursor.execute(sql)
         columns = [desc[0] for desc in cursor.description]
-        rows = [dict(row) for row in cursor.fetchall()]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
         conn.close()
 
         # Convert timestamps to strings
@@ -129,7 +151,7 @@ def execute_query(sql: str) -> tuple[list, list]:
                     row[key] = val.isoformat()
 
         return columns, rows
-    except sqlite3.Error as e:
+    except Exception as e:
         app.logger.error(f"SQL error: {e}")
         raise
 
@@ -242,8 +264,8 @@ def health():
         count = cursor.fetchone()[0]
         conn.close()
         status["db"] = f"connected ({count} observations)"
-    except:
-        status["db"] = "error"
+    except Exception as e:
+        status["db"] = f"error ({str(e)})"
 
     return jsonify(status)
 
