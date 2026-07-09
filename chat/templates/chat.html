@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Camera Brain Chat</title>
+    <title>Camera Brain - Neural Interface</title>
     <style>
         * {
             margin: 0;
@@ -11,169 +11,278 @@
             box-sizing: border-box;
         }
 
+        :root {
+            --neon-blue: #00f3ff;
+            --neon-purple: #bc13fe;
+            --neon-green: #0aff0a;
+            --dark-bg: #0a0a0f;
+            --panel-bg: #12121a;
+            --border-color: #2a2a3a;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: #0f1419;
+            font-family: 'Consolas', 'Monaco', monospace;
+            background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 100%);
             color: #e7e9ea;
             height: 100vh;
-            display: flex;
-            flex-direction: column;
+            overflow: hidden;
         }
 
         .container {
-            max-width: 900px;
+            max-width: 1000px;
             margin: 0 auto;
-            width: 100%;
-            flex: 1;
+            height: 100vh;
             display: flex;
             flex-direction: column;
-            padding: 20px;
+            padding: 15px;
         }
 
+        /* Futuristic header with glow effect */
         header {
-            padding: 20px 0;
-            border-bottom: 1px solid #2f3336;
-            margin-bottom: 20px;
+            padding: 15px 0;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
         h1 {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: #1d9bf0;
+            font-size: 1.4rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, var(--neon-blue), var(--neon-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 20px rgba(0, 243, 255, 0.3);
+            letter-spacing: 2px;
         }
 
         .status {
-            font-size: 0.85rem;
-            color: #71767b;
-            margin-top: 8px;
+            font-size: 0.75rem;
+            color: var(--neon-green);
+            display: flex;
+            gap: 15px;
         }
 
         .status span {
-            color: #00ba7c;
+            padding: 4px 10px;
+            background: rgba(10, 255, 10, 0.1);
+            border: 1px solid var(--neon-green);
+            border-radius: 4px;
         }
 
+        .status .error {
+            color: #ff4444;
+            background: rgba(255, 68, 68, 0.1);
+            border-color: #ff4444;
+        }
+
+        /* Chat container with scroll */
         #chat-container {
             flex: 1;
             overflow-y: auto;
             padding: 20px;
-            background: #16181c;
-            border-radius: 12px;
-            margin-bottom: 20px;
+            background: var(--panel-bg);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 15px;
+            scroll-behavior: smooth;
         }
 
+        #chat-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #chat-container::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+
+        /* Message styling */
         .message {
             margin-bottom: 20px;
-            padding: 16px;
+            padding: 16px 20px;
             border-radius: 8px;
-            line-height: 1.5;
+            line-height: 1.6;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         .message.user {
-            background: #1d9bf0;
-            color: white;
-            margin-left: 20%;
+            background: linear-gradient(135deg, rgba(0, 243, 255, 0.2), rgba(188, 19, 254, 0.2));
+            border: 1px solid var(--neon-blue);
+            margin-left: 25%;
+            border-right: 3px solid var(--neon-blue);
         }
 
         .message.assistant {
-            background: #2f3336;
-            margin-right: 20%;
+            background: linear-gradient(135deg, rgba(40, 40, 60, 0.8), rgba(30, 30, 50, 0.8));
+            border: 1px solid var(--border-color);
+            margin-right: 25%;
+            border-left: 3px solid var(--neon-purple);
+        }
+
+        .message.assistant strong {
+            color: var(--neon-blue);
         }
 
         .message .sql {
-            font-family: 'SF Mono', Monaco, monospace;
-            font-size: 0.8rem;
-            background: #16181c;
-            padding: 8px 12px;
+            font-family: 'Consolas', monospace;
+            font-size: 0.75rem;
+            background: #0a0a0f;
+            padding: 10px 14px;
             border-radius: 4px;
-            margin-top: 10px;
-            color: #1d9bf0;
+            margin-top: 12px;
+            color: var(--neon-blue);
+            border: 1px solid var(--border-color);
             overflow-x: auto;
         }
 
         .message.error {
-            background: #f4212e20;
-            border: 1px solid #f4212e;
-            color: #f4212e;
+            background: rgba(255, 68, 68, 0.15);
+            border: 1px solid #ff4444;
+            color: #ff6b6b;
+        }
+
+        /* Results table - hidden by default, show on toggle */
+        .results-section {
+            margin-top: 15px;
+            display: none;
+        }
+
+        .results-section.visible {
+            display: block;
+        }
+
+        .toggle-results {
+            font-size: 0.8rem;
+            color: var(--neon-blue);
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 8px 0;
+            text-decoration: underline;
+        }
+
+        .toggle-results:hover {
+            color: var(--neon-purple);
         }
 
         .results-table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 12px;
-            font-size: 0.85rem;
+            margin-top: 10px;
+            font-size: 0.8rem;
         }
 
         .results-table th,
         .results-table td {
             padding: 8px;
             text-align: left;
-            border-bottom: 1px solid #2f3336;
+            border-bottom: 1px solid var(--border-color);
         }
 
         .results-table th {
-            color: #71767b;
-            font-weight: 500;
+            color: var(--neon-blue);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 1px;
         }
 
         .results-table tr:hover {
-            background: #2f3336;
+            background: rgba(0, 243, 255, 0.05);
+        }
+
+        /* Floating input area - fixed at bottom */
+        .input-wrapper {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(180deg, transparent, var(--dark-bg) 20%);
+            padding: 30px 20px 20px;
+            pointer-events: none;
         }
 
         .input-area {
+            max-width: 1000px;
+            margin: 0 auto;
             display: flex;
-            gap: 12px;
-            padding: 16px;
-            background: #16181c;
+            gap: 10px;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
             border-radius: 12px;
+            padding: 8px;
+            pointer-events: auto;
+            box-shadow: 0 -5px 30px rgba(0, 0, 0, 0.5),
+                        0 0 20px rgba(0, 243, 255, 0.1);
+        }
+
+        .input-area:focus-within {
+            border-color: var(--neon-blue);
+            box-shadow: 0 -5px 30px rgba(0, 0, 0, 0.5),
+                        0 0 30px rgba(0, 243, 255, 0.2);
         }
 
         #question-input {
             flex: 1;
             padding: 14px 18px;
-            border: 1px solid #2f3336;
+            border: none;
             border-radius: 8px;
-            background: #0f1419;
+            background: #0a0a0f;
             color: #e7e9ea;
-            font-size: 1rem;
+            font-size: 0.95rem;
+            font-family: inherit;
             outline: none;
-            transition: border-color 0.2s;
-        }
-
-        #question-input:focus {
-            border-color: #1d9bf0;
         }
 
         #question-input::placeholder {
-            color: #71767b;
+            color: #666;
         }
 
         #send-btn {
             padding: 14px 28px;
-            background: #1d9bf0;
+            background: linear-gradient(135deg, var(--neon-blue), var(--neon-purple));
             color: white;
             border: none;
             border-radius: 8px;
-            font-size: 1rem;
+            font-size: 0.9rem;
             font-weight: 600;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.2s;
+            font-family: inherit;
+            letter-spacing: 1px;
         }
 
-        #send-btn:hover {
-            background: #1a8cd8;
+        #send-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0, 243, 255, 0.4);
         }
 
         #send-btn:disabled {
-            background: #2f3336;
+            background: var(--border-color);
             cursor: not-allowed;
         }
 
+        /* Loading spinner with timer */
+        .loading-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 20px;
+            color: var(--neon-blue);
+        }
+
         .loading {
-            display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 2px solid #2f3336;
-            border-top-color: #1d9bf0;
+            width: 24px;
+            height: 24px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--neon-blue);
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
@@ -182,34 +291,77 @@
             to { transform: rotate(360deg); }
         }
 
+        .loading-timer {
+            font-size: 0.85rem;
+            color: var(--neon-blue);
+        }
+
+        .loading-text {
+            font-size: 0.85rem;
+            color: #888;
+        }
+
+        /* Typing indicator */
+        .typing-dots {
+            display: inline-flex;
+            gap: 4px;
+        }
+
+        .typing-dots span {
+            width: 6px;
+            height: 6px;
+            background: var(--neon-blue);
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+
+        .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes typing {
+            0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+            30% { opacity: 1; transform: translateY(-5px); }
+        }
+
+        /* Hidden class */
         .hidden {
             display: none;
         }
 
-        .result-count {
-            font-size: 0.8rem;
-            color: #71767b;
-            margin-top: 8px;
+        /* Spacing for fixed input */
+        .spacer {
+            height: 100px;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Camera Brain Chat</h1>
-            <div class="status" id="status">Checking status...</div>
+            <h1>CAMERA BRAIN v2.0</h1>
+            <div class="status" id="status">
+                <span id="status-llm">LLM: --</span>
+                <span id="status-db">DB: --</span>
+            </div>
         </header>
 
-        <div id="chat-container"></div>
+        <div id="chat-container">
+            <div class="message assistant">
+                <div>Welcome to Camera Brain Neural Interface. Query the surveillance database using natural language.</div>
+            </div>
+        </div>
 
+        <div class="spacer"></div>
+    </div>
+
+    <div class="input-wrapper">
         <div class="input-area">
             <input
                 type="text"
                 id="question-input"
-                placeholder="Ask about camera observations (e.g., 'Show me all cars detected today')"
+                placeholder="Query: e.g., 'How many vehicles were detected today?'"
                 autofocus
             >
-            <button id="send-btn">Send</button>
+            <button id="send-btn">QUERY</button>
         </div>
     </div>
 
@@ -217,19 +369,24 @@
         const chatContainer = document.getElementById('chat-container');
         const questionInput = document.getElementById('question-input');
         const sendBtn = document.getElementById('send-btn');
-        const statusEl = document.getElementById('status');
+        let loadingStartTime = null;
+        let loadingTimerInterval = null;
 
         // Check system status
         async function checkStatus() {
             try {
                 const res = await fetch('/health');
                 const data = await res.json();
-                statusEl.innerHTML = `LLM: <span>${data.llama_server}</span> | DB: <span>${data.db}</span>`;
+                document.getElementById('status-llm').textContent = `LLM: ${data.llama_server}`;
+                document.getElementById('status-llm').className = data.llama_server === 'connected' ? '' : 'error';
+                document.getElementById('status-db').textContent = `DB: ${data.db.split('(')[0].trim()}`;
+                document.getElementById('status-db').className = data.db.includes('error') ? 'error' : '';
             } catch (e) {
-                statusEl.innerHTML = `Error: ${e.message}`;
+                document.getElementById('status-llm').textContent = `Error: ${e.message}`;
             }
         }
         checkStatus();
+        setInterval(checkStatus, 30000);
 
         // Add message to chat
         function addMessage(content, type, sql = null, results = null) {
@@ -243,7 +400,7 @@
             }
 
             if (results && results.length > 0) {
-                html += renderResults(results);
+                html += renderResultsToggle(results);
             }
 
             msg.innerHTML = html;
@@ -251,12 +408,57 @@
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
-        // Render results table
-        function renderResults(results) {
+        // Add loading indicator with timer
+        function addLoadingIndicator() {
+            const msg = document.createElement('div');
+            msg.className = 'message assistant';
+            msg.id = 'loading-message';
+            msg.innerHTML = `
+                <div class="loading-container">
+                    <div class="loading"></div>
+                    <div>
+                        <div class="typing-dots"><span></span><span></span><span></span></div>
+                        <div class="loading-timer" id="loading-timer">0.0s</div>
+                        <div class="loading-text">Querying neural database...</div>
+                    </div>
+                </div>
+            `;
+            chatContainer.appendChild(msg);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+
+            // Start timer
+            loadingStartTime = performance.now();
+            loadingTimerInterval = setInterval(() => {
+                const elapsed = ((performance.now() - loadingStartTime) / 1000).toFixed(1);
+                document.getElementById('loading-timer').textContent = `${elapsed}s`;
+            }, 100);
+        }
+
+        // Remove loading indicator
+        function removeLoadingIndicator() {
+            const loadingMsg = document.getElementById('loading-message');
+            if (loadingMsg) {
+                loadingMsg.remove();
+            }
+            if (loadingTimerInterval) {
+                clearInterval(loadingTimerInterval);
+                loadingTimerInterval = null;
+            }
+        }
+
+        // Render results with toggle
+        function renderResultsToggle(results) {
             if (!results || results.length === 0) return '';
 
             const columns = Object.keys(results[0]);
-            let html = '<table class="results-table"><thead><tr>';
+            let html = `
+                <div class="results-section">
+                    <button class="toggle-results" onclick="this.parentElement.classList.toggle('visible'); this.textContent = this.parentElement.classList.contains('visible') ? 'Hide data' : 'Show raw data'">
+                        Show raw data (${results.length} records)
+                    </button>
+                    <table class="results-table">
+                        <thead><tr>
+            `;
 
             columns.forEach(col => {
                 html += `<th>${escapeHtml(col)}</th>`;
@@ -268,7 +470,7 @@
                 html += '<tr>';
                 columns.forEach(col => {
                     let val = row[col];
-                    if (typeof val === 'object') {
+                    if (typeof val === 'object' && val !== null) {
                         val = JSON.stringify(val);
                     }
                     html += `<td>${escapeHtml(String(val))}</td>`;
@@ -278,8 +480,9 @@
 
             html += '</tbody></table>';
             if (results.length > 10) {
-                html += `<div class="result-count">Showing 10 of ${results.length} results</div>`;
+                html += `<div style="font-size:0.75rem;color:#666;padding:8px;">Showing 10 of ${results.length} records</div>`;
             }
+            html += '</div>';
 
             return html;
         }
@@ -297,9 +500,7 @@
 
             questionInput.value = '';
             sendBtn.disabled = true;
-            sendBtn.innerHTML = '<span class="loading"></span>';
-
-            addMessage(question, 'user');
+            addLoadingIndicator();
 
             try {
                 const res = await fetch('/chat', {
@@ -309,18 +510,19 @@
                 });
 
                 const data = await res.json();
+                removeLoadingIndicator();
 
                 if (!res.ok) {
-                    addMessage(data.error || 'Request failed', 'error');
+                    addMessage(data.error || 'Query failed', 'error');
                 } else {
                     addMessage(data.answer, 'assistant', data.sql, data.results);
                 }
             } catch (e) {
+                removeLoadingIndicator();
                 addMessage(`Error: ${e.message}`, 'error');
             }
 
             sendBtn.disabled = false;
-            sendBtn.textContent = 'Send';
             questionInput.focus();
         }
 
