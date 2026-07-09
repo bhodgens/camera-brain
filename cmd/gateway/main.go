@@ -24,11 +24,11 @@ import (
 
 // Server is the gateway HTTP server.
 type Server struct {
-	db          *sql.DB
-	nats        *nats.Conn
-	registry    *WorkerRegistry
-	port        int
-	mux         *http.ServeMux
+	db              *sql.DB
+	nats            *nats.Conn
+	registry        *WorkerRegistry
+	port            int
+	mux             *http.ServeMux
 	natsUnsubscribe func()
 }
 
@@ -112,9 +112,6 @@ func (r *WorkerRegistry) RegisterWorker(id string, cameraID *uuid.UUID) error {
 }
 
 // ListWorkers returns a deep copy of all registered workers as values.
-// Returning values (not pointers) under the read lock prevents data races
-// between the NATS heartbeat goroutine (which mutates the stored *Worker
-// structs) and HTTP handlers that iterate and JSON-encode the result.
 func (r *WorkerRegistry) ListWorkers() []Worker {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -157,7 +154,6 @@ func (r *WorkerRegistry) GetWorker(id string) (Worker, bool) {
 
 // AssignCamera assigns a camera to a worker via NATS.
 func (r *WorkerRegistry) AssignCamera(workerID string, cameraID uuid.UUID) error {
-	// Fetch camera details from database
 	var rtspURL, location string
 	err := r.db.QueryRow(`SELECT rtsp_url, location FROM cameras WHERE id = $1`, cameraID).Scan(&rtspURL, &location)
 	if err != nil {
@@ -165,9 +161,9 @@ func (r *WorkerRegistry) AssignCamera(workerID string, cameraID uuid.UUID) error
 	}
 
 	msg := map[string]interface{}{
-		"camera_id":  cameraID.String(),
-		"rtsp_url":   rtspURL,
-		"location":   location,
+		"camera_id":   cameraID.String(),
+		"rtsp_url":    rtspURL,
+		"location":    location,
 		"assigned_at": time.Now().Format(time.RFC3339),
 	}
 	data, err := json.Marshal(msg)
@@ -191,11 +187,11 @@ func NewServer(db *sql.DB, nc *nats.Conn, registry *WorkerRegistry, port int, un
 	s.mux.HandleFunc("/workers", s.handleWorkers)
 	s.mux.HandleFunc("/cameras", s.handleCameras)
 	s.mux.HandleFunc("/cameras/", s.handleCamera)
+	s.mux.HandleFunc("/observations", s.handleObservations)
 	return s
 }
 
 // handleHealth verifies dependencies (DB + NATS) before returning 200.
-// Returns 503 if any dependency is unhealthy.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
@@ -239,7 +235,6 @@ func (s *Server) handleCameras(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewEncoder(w).Encode(cameras); err != nil {
 			slog.Warn("Failed to encode cameras list response", "error", err)
 		}
-
 	case http.MethodPost:
 		var cam Camera
 		if err := json.NewDecoder(r.Body).Decode(&cam); err != nil {
@@ -254,7 +249,6 @@ func (s *Server) handleCameras(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewEncoder(w).Encode(cam); err != nil {
 			slog.Warn("Failed to encode camera create response", "error", err)
 		}
-
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -262,7 +256,6 @@ func (s *Server) handleCameras(w http.ResponseWriter, r *http.Request) {
 
 // handleCamera handles /cameras/{camera_id}/assign.
 func (s *Server) handleCamera(w http.ResponseWriter, r *http.Request) {
-	// Parse camera ID from path
 	path := strings.TrimPrefix(r.URL.Path, "/cameras/")
 	parts := strings.Split(path, "/")
 	if len(parts) < 1 || parts[0] == "" {
@@ -271,7 +264,6 @@ func (s *Server) handleCamera(w http.ResponseWriter, r *http.Request) {
 	}
 	cameraIDStr := parts[0]
 
-	// Handle assignment
 	if r.Method == http.MethodPost {
 		workerID := r.URL.Query().Get("worker_id")
 		if workerID == "" {
@@ -300,6 +292,71 @@ func (s *Server) handleCamera(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
+// handleObservations handles POST /observations to record detections.
+func (s *Server) handleObservations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	type ObservationRequest struct {
+		CameraID   string                 `json:"camera_id"`
+		WorkerID   string                 `json:"worker_id"`
+		DetectedAt string                 `json:"detected_at"`
+		ClassName  string                 `json:"class_name"`
+		Confidence float32                `json:"confidence"`
+		BBox       [4]int                 `json:"bbox"`
+		CropPath   string                 `json:"crop_path"`
+		Attributes map[string]interface{} `json:"attributes,omitempty"`
+	}
+
+	var req ObservationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.CameraID == "" || req.ClassName == "" {
+		http.Error(w, "camera_id and class_name are required", http.StatusBadRequest)
+		return
+	}
+
+	detectedAt, err := time.Parse(time.RFC3339, req.DetectedAt)
+	if err != nil {
+		detectedAt = time.Now().UTC()
+	}
+
+	// Get camera ID from database (lookup by name)
+	var cameraUUID string
+	err = s.db.QueryRow("SELECT id FROM cameras WHERE name = $1", req.CameraID).Scan(&cameraUUID)
+	if err != nil {
+		http.Error(w, "camera not found: "+req.CameraID, http.StatusNotFound)
+		return
+	}
+
+	bboxJSON, _ := json.Marshal(req.BBox)
+	id := uuid.New().String()
+
+	var attrs json.RawMessage
+	if req.Attributes != nil {
+		attrs, _ = json.Marshal(req.Attributes)
+	} else {
+		attrs = json.RawMessage("null")
+	}
+
+	_, err = s.db.Exec(
+		"INSERT INTO observations (id, camera_id, detected_at, type, class_name, confidence, bbox, crop_path, attributes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+		id, cameraUUID, detectedAt, "detection", req.ClassName, req.Confidence, bboxJSON, req.CropPath, attrs)
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "recorded", "id": id})
+}
+
 // listCameras returns all cameras from the database.
 func (s *Server) listCameras() ([]Camera, error) {
 	rows, err := s.db.Query(`
@@ -314,8 +371,7 @@ func (s *Server) listCameras() ([]Camera, error) {
 	var cameras []Camera
 	for rows.Next() {
 		var cam Camera
-		err := rows.Scan(&cam.ID, &cam.Name, &cam.RTSPURL, &cam.Location, &cam.Active, &cam.CreatedAt)
-		if err != nil {
+		if err := rows.Scan(&cam.ID, &cam.Name, &cam.RTSPURL, &cam.Location, &cam.Active, &cam.CreatedAt); err != nil {
 			return nil, err
 		}
 		cameras = append(cameras, cam)
@@ -359,8 +415,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	return server.Shutdown(shutdownCtx)
 }
 
-// listenHeartbeats subscribes to worker heartbeats and returns an
-// unsubscribe function that detaches the subscription from NATS.
+// listenHeartbeats subscribes to worker heartbeats and returns an unsubscribe function.
 func listenHeartbeats(nc *nats.Conn, registry *WorkerRegistry) (func(), error) {
 	sub, err := nc.Subscribe("workers.heartbeat.>", func(msg *nats.Msg) {
 		var hb struct {
@@ -393,15 +448,12 @@ func listenHeartbeats(nc *nats.Conn, registry *WorkerRegistry) (func(), error) {
 }
 
 func main() {
-	// Load configuration
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		slog.Error("Failed to load config", "error", err)
 		os.Exit(1)
 	}
 
-	// Connect to database. pq.QuoteLiteral defensively escapes the password
-	// (install.sh generates alphanumeric-only passwords today).
 	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Storage.Host, cfg.Storage.Port, cfg.Storage.Username,
 		pq.QuoteLiteral(cfg.Storage.Password), cfg.Storage.Database, cfg.Storage.SSLMode)
@@ -413,7 +465,6 @@ func main() {
 	}
 	defer db.Close()
 
-	// Bounded pool: prevents exhaustion of Postgres max_connections under load.
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(30 * time.Minute)
@@ -423,7 +474,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Connect to NATS. NATS_URL env var allows non-co-located deployments.
 	nc, err := nats.Connect(cfg.Service.NATSURL)
 	if err != nil {
 		slog.Error("Failed to connect to NATS", "error", err, "url", cfg.Service.NATSURL)
@@ -431,21 +481,17 @@ func main() {
 	}
 	defer nc.Close()
 
-	// Create worker registry
 	registry := NewWorkerRegistry(db, nc)
 
-	// Start heartbeat listener
 	unsub, err := listenHeartbeats(nc, registry)
 	if err != nil {
 		slog.Error("Failed to subscribe to heartbeats", "error", err)
 		os.Exit(1)
 	}
 
-	// Create and start server
 	server := NewServer(db, nc, registry, cfg.Service.Port, unsub)
 	defer server.Close()
 
-	// Setup context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

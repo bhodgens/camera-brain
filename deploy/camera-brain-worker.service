@@ -1,0 +1,19 @@
+[Unit]
+Description=Camera Brain Worker Service
+After=network.target nat.service
+
+[Service]
+Type=simple
+User=caimlas
+Group=caimlas
+Environment="WORKER_MODEL_PATH=/home/camera-brain/models/yolov5s_int8.rknn"
+Environment="GATEWAY_URL=http://localhost:8080"
+Environment="NATS_URL=nats://localhost:4222"
+Environment="PATH=/usr/local/go/bin:/usr/bin:/bin"
+WorkingDirectory=/home/camera-brain/bin
+ExecStart=/home/camera-brain/bin/camera-worker
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
