@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy chat application to rock0 on port 80
+# Deploy chat application to rock0 with port 80 access via iptables redirect
 
 set -e
 
@@ -25,6 +25,12 @@ echo "Installing systemd service..."
 scp deploy/camera-brain-chat.service rock0:/tmp/camera-brain-chat.service
 ssh rock0 "sudo mv /tmp/camera-brain-chat.service /etc/systemd/system/camera-brain-chat.service"
 
+# Setup iptables redirect from port 80 to 8080
+echo "Setting up port redirect (80 -> 8080)..."
+ssh rock0 "sudo iptables -t nat -F PREROUTING 2>/dev/null || true"
+ssh rock0 "sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080"
+ssh rock0 "sudo iptables-save | sudo grep -q '80.*8080' || sudo iptables-save | sudo tee /etc/iptables/rules.v4 > /dev/null"
+
 # Reload and start
 echo "Starting service..."
 ssh rock0 "sudo systemctl daemon-reload && sudo systemctl enable camera-brain-chat && sudo systemctl start camera-brain-chat"
@@ -43,5 +49,5 @@ ssh rock0 "curl -s http://localhost/health | python3 -m json.tool 2>/dev/null ||
 
 echo ""
 echo "✓ Chat application deployed successfully!"
-echo "  Web interface: http://rock0/"
+echo "  Web interface: http://rock0/ (redirects to port 8080)"
 echo "  Logs: ssh rock0 'sudo journalctl -u camera-brain-chat -f'"
