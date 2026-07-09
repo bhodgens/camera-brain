@@ -24,7 +24,7 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "camera_brain")
 DB_USER = os.getenv("DB_USER", "camera_brain")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "camera_brain")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "camera_brain_password_change_me")
 DB_PATH = os.getenv("DB_PATH", "/home/camera-brain/camera-brain.db")  # SQLite fallback
 LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8889")
 MODEL_PATH = os.getenv("MODEL_PATH", "/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q4_K_M.gguf")
@@ -37,7 +37,7 @@ Database schema:
 
 The 'bbox' column is JSON: [x1, y1, x2, y2]
 'detected_at' is a timestamp
-'class_name' includes: person, car, truck, bus, bicycle, etc.
+'class_name' includes: person, car, truck, bus, bicycle, bird, cat, dog, etc. (80 COCO classes)
 """
 
 SYSTEM_PROMPT = f"""You are a SQL query generator for a camera surveillance database.
@@ -45,16 +45,16 @@ SYSTEM_PROMPT = f"""You are a SQL query generator for a camera surveillance data
 
 Convert the user's natural language question into a PostgreSQL SELECT query.
 - Only generate SELECT queries (no INSERT, UPDATE, DELETE, DROP)
-- Use DATE() for date filtering: DATE(detected_at) = '2026-07-08'
+- Use DATE(detected_at) for date filtering
 - Use LIMIT to restrict results (max 100)
 - Return ONLY the SQL query, no explanation
 
 Examples:
 Q: "Show me all people detected today"
-A: SELECT * FROM observations WHERE class_name='person' AND DATE(detected_at)='2026-07-08' LIMIT 50
+A: SELECT * FROM observations WHERE class_name='person' AND DATE(detected_at)=CURRENT_DATE LIMIT 50
 
 Q: "How many cars were detected yesterday?"
-A: SELECT count(*) FROM observations WHERE class_name IN ('car', 'truck', 'bus') AND DATE(detected_at)='2026-07-07'
+A: SELECT count(*) FROM observations WHERE class_name IN ('car', 'truck', 'bus') AND DATE(detected_at)=CURRENT_DATE - INTERVAL '1 day'
 
 Q: "What detections occurred on camera cam4?"
 A: SELECT * FROM observations WHERE camera_id='cam4' ORDER BY detected_at DESC LIMIT 50
@@ -102,11 +102,22 @@ def generate_sql_query(question: str) -> str:
         result = response.json()
         sql = result["choices"][0]["message"]["content"].strip()
 
-        # Clean up the response - extract just the SQL
-        if "SELECT" in sql.upper():
-            sql = sql.upper().split("SELECT", 1)[1]
-            sql = "SELECT " + sql.split(";")[0].strip()
-        return sql
+        # Extract SQL from response - handle various formats
+        # Remove markdown code blocks if present
+        sql = sql.replace("```sql", "").replace("```", "").strip()
+
+        # Find SELECT keyword and extract from there
+        select_idx = sql.upper().find("SELECT")
+        if select_idx >= 0:
+            sql = sql[select_idx:]
+            # Remove anything after the statement (explanations, etc.)
+            if ";" in sql:
+                sql = sql.split(";")[0].strip()
+            return sql
+
+        # If no SELECT found, log and return None
+        app.logger.warning(f"No SELECT found in LLM response: {sql}")
+        return None
     except requests.RequestException as e:
         app.logger.error(f"LLM request failed: {e}")
         return None
@@ -156,7 +167,68 @@ def execute_query(sql: str) -> tuple[list, list]:
         raise
 
 
-def generate_answer(question: str, results: list) -> str:
+def generate_answer(question: str, results: list, sql: str = None) -> str:
+    """Use LLM to generate a natural language answer from query results.
+
+    Provides accurate, specific answers based on actual data - not vague summaries.
+    """
+    if not results:
+        return "No matching observations found for your query."
+
+    # For COUNT queries, provide a direct answer
+    if sql and 'count(*)' in sql.lower():
+        count = results[0].get('count', len(results)) if results else 0
+        return f"Found {count} observations matching your query."
+
+    # For aggregation queries (GROUP BY), summarize the distribution
+    if sql and 'group by' in sql.lower():
+        summary_parts = []
+        for row in results[:5]:  # Top 5 results
+            class_name = row.get('class_name', row.get('class', 'unknown'))
+            cnt = row.get('count', row.get('total', 0))
+            if cnt:
+                summary_parts.append(f"{cnt} {class_name}")
+
+        if summary_parts:
+            return f"Detected: {', '.join(summary_parts)}."
+        return f"Found {len(results)} categories of observations."
+
+    # For detail queries, provide a concise summary
+    try:
+        # Extract key patterns from results
+        class_counts = {}
+        time_range = None
+        cameras = set()
+
+        for row in results:
+            cn = row.get('class_name', 'unknown')
+            class_counts[cn] = class_counts.get(cn, 0) + 1
+            if 'detected_at' in row and row['detected_at']:
+                cameras.add(row.get('camera_id', 'unknown'))
+
+        # Build specific answer
+        answer_parts = []
+        total = len(results)
+
+        if class_counts:
+            top_classes = sorted(class_counts.items(), key=lambda x: -x[1])[:3]
+            class_summary = ', '.join(f"{cnt} {name}" for name, cnt in top_classes)
+            answer_parts.append(f"Found {total} observations: {class_summary}")
+
+        if len(class_counts) > 3:
+            answer_parts.append(f"across {len(class_counts)} different classes")
+
+        if cameras:
+            answer_parts.append(f"on {len(cameras)} camera(s)")
+
+        return '. '.join(answer_parts) + '.'
+
+    except Exception as e:
+        app.logger.error(f"Answer generation error: {e}")
+        return f"Query returned {len(results)} results."
+
+
+def generate_answer_v2(question: str, results: list) -> str:
     """Use LLM to generate a natural language answer from query results."""
     if not results:
         return "No matching observations found."
@@ -171,7 +243,7 @@ Question: {question}
 Results (showing first {len(results[:10])} of {len(results)}):
 {summary}
 
-Provide a clear, concise answer summarizing what was found. If there are many results, mention the count."""
+Provide a clear, concise answer summarizing what was found. If there are many results, mention the count. Be specific about numbers and categories."""
 
         response = requests.post(
             f"{LLAMA_SERVER_URL}/v1/chat/completions",
@@ -232,7 +304,7 @@ def chat():
         return jsonify({"error": f"Query failed: {str(e)}", "sql": sql}), 500
 
     # Step 4: Generate natural language answer
-    answer = generate_answer(question, rows)
+    answer = generate_answer(question, rows, sql)
 
     return jsonify({
         "success": True,
