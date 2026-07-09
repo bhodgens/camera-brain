@@ -4,10 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=caimlas
+Group=caimlas
+WorkingDirectory=/home/camera-brain
 Environment="MODEL_PATH=/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q8_0.gguf"
-ExecStart=/tmp/llama.cpp/build/bin/llama-server -m /home/camera-brain/models/LFM2.5-1.2B-Instruct.Q8_0.gguf --host 0.0.0.0 --port 8889 --ctx-size 4096 --n-gpu-layers 0 --threads 4 --batch-size 512 --ubatch-size 512 --log-file /home/camera-brain/logs/llama-server-text.log
+ExecStart=/usr/local/bin/llama-server -m /home/camera-brain/models/LFM2.5-1.2B-Instruct.Q8_0.gguf --host 0.0.0.0 --port 8889 --ctx-size 4096 --n-gpu-layers 0 --threads 4 --batch-size 512 --ubatch-size 512
 Restart=on-failure
 RestartSec=5
 
