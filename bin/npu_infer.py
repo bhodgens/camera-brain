@@ -1,141 +1,184 @@
 #!/usr/bin/env python3
 """
-RKNN YOLOv5 inference script for use with Go worker.
-Reads image from stdin as raw RGB bytes, outputs detections as JSON.
-
-Usage:
-    echo "<base64_encoded_image>" | python3 npu_infer.py
-    or
-    python3 npu_infer.py --image <path> --output json
+NPU Inference script for YOLOv5 RKNN models.
+Reads JPEG image from stdin, outputs JSON detections.
 """
 
 import sys
 import json
-import base64
-import numpy as np
-from io import BytesIO
+import struct
+from rknnlite.api import RKNNLite
 
-try:
-    from rknn.api import RKNN
-    from PIL import Image
-except ImportError as e:
-    print(f"ERROR: Missing dependency: {e}", file=sys.stderr)
-    sys.exit(1)
+# COCO 80 class names
+COCO_CLASSES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+    "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+    "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+    "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
+    "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop",
+    "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+]
 
-MODEL_PATH = "/home/camera-brain/models/yolov5s_fp16.rknn"
-INPUT_SIZE = 640
+MODEL_PATH = "/home/camera-brain/models/yolov5s_int8.rknn"
 CONF_THRESHOLD = 0.25
 NMS_THRESHOLD = 0.45
+INPUT_SIZE = 640
 
-COCO_CLASSES = {
-    0: "person", 1: "bicycle", 2: "car", 3: "motorcycle",
-    4: "airplane", 5: "bus", 6: "train", 7: "truck",
-    8: "boat", 9: "traffic light", 10: "fire hydrant",
-    11: "stop sign", 12: "parking meter", 13: "bench",
-    14: "bird", 15: "cat", 16: "dog", 17: "horse",
-    18: "sheep", 19: "cow", 20: "elephant",
-}
+def main():
+    # Read JPEG from stdin
+    img_data = sys.stdin.buffer.read()
+    if not img_data:
+        print(json.dumps({"success": False, "error": "No image data"}))
+        return
 
-_rknn = None
-
-def init_rknn():
-    global _rknn
-    if _rknn is None:
-        _rknn = RKNN()
-        ret = _rknn.load_rknn(MODEL_PATH)
+    try:
+        # Initialize RKNN
+        rknn = RKNNLite()
+        ret = rknn.load_rknn(path=MODEL_PATH)
         if ret != 0:
-            print(f"ERROR: load_rknn failed: {ret}", file=sys.stderr)
-            return None
-        ret = _rknn.init_runtime(target='rk3568')
-        if ret != 0:
-            print(f"ERROR: init_runtime failed: {ret}", file=sys.stderr)
-            return None
-    return _rknn
+            print(json.dumps({"success": False, "error": f"Load RKNN failed: {ret}"}))
+            return
 
-def preprocess(img_bytes):
-    """Decode image and resize to INPUT_SIZE x INPUT_SIZE."""
-    img = Image.open(BytesIO(img_bytes)).convert('RGB')
-    img = img.resize((INPUT_SIZE, INPUT_SIZE), Image.Resampling.BILINEAR)
-    return np.array(img, dtype=np.uint8)
+        # Run inference
+        ret = rknn.inference(inputs=[img_data])
+        if ret is None:
+            print(json.dumps({"success": False, "error": "Inference failed"}))
+            return
 
-def parse_output(outputs):
-    """
-    Parse YOLOv5 output tensor (ultralytics format) to detections.
+        # Parse outputs (assuming concatenated single output)
+        outputs = ret[0] if isinstance(ret, list) else ret
 
-    Model outputs single tensor: (1, 84, 8400)
-    Format per anchor: [cx, cy, w, h, conf, class_scores...]
-    - Columns 0-3: box coordinates (center x, center y, width, height)
-    - Column 4: objectness confidence
-    - Columns 5-84: 80 COCO class scores
+        # Simple YOLOv5 output parsing
+        # Output shape: (1, 25200, 85) = (batch, anchors, [box(4) + conf(1) + classes(80)])
+        detections = parse_yolo_outputs(outputs)
 
-    Final confidence = objectness * max(class_scores)
-    """
-    if len(outputs) != 1:
-        print(f"ERROR: Expected 1 output, got {len(outputs)}", file=sys.stderr)
-        return []
+        print(json.dumps({
+            "success": True,
+            "detections": detections,
+            "count": len(detections)
+        }))
 
-    # Reshape to (8400, 84)
-    out = outputs[0].reshape(84, 8400).T
+    except Exception as e:
+        print(json.dumps({"success": False, "error": str(e)}))
 
-    # Extract components
-    boxes = out[:, 0:4]  # (8400, 4) - cx, cy, w, h
-    objectness = out[:, 4]  # (8400,) - obj conf
-    class_scores = out[:, 5:85]  # (8400, 80) - class scores
-
-    # Final confidence = objectness * best class score
-    best_class_idx = class_scores.argmax(axis=1)  # (8400,)
-    best_class_score = class_scores.max(axis=1)  # (8400,)
-    confidence = objectness * best_class_score  # (8400,)
+def parse_yolo_outputs(outputs):
+    """Parse YOLOv5 RKNN outputs and apply NMS."""
+    import numpy as np
 
     detections = []
-    for i in range(len(boxes)):
-        if confidence[i] < CONF_THRESHOLD:
-            continue
 
-        cx, cy, w, h = boxes[i]
-        best_class = int(best_class_idx[i])
-        best_score = float(confidence[i])
+    # Handle different output shapes
+    if outputs.ndim == 3:
+        # Single concatenated output: (1, 25200, 85)
+        outputs = outputs[0]  # (25200, 85)
+    elif outputs.ndim == 2:
+        # Already flattened
+        pass
 
-        # Convert to corner coordinates
-        x1 = int(cx - w/2)
-        y1 = int(cy - h/2)
-        x2 = int(cx + w/2)
-        y2 = int(cy + h/2)
+    # YOLOv5 anchors
+    anchors = [
+        [10, 13], [16, 30], [33, 23],
+        [30, 61], [62, 45], [59, 119],
+        [116, 90], [156, 198], [373, 326]
+    ]
+    strides = [8, 16, 32]
 
-        # Clamp to image bounds
-        x1 = max(0, min(INPUT_SIZE, x1))
-        y1 = max(0, min(INPUT_SIZE, y1))
-        x2 = max(0, min(INPUT_SIZE, x2))
-        y2 = max(0, min(INPUT_SIZE, y2))
+    for stride_idx, stride in enumerate(strides):
+        grid_size = INPUT_SIZE // stride
+        anchor_start = stride_idx * 3
 
-        detections.append({
-            "class_id": best_class,
-            "class_name": COCO_CLASSES.get(best_class, "unknown"),
-            "confidence": best_score,
-            "bbox": [x1, y1, x2, y2]
-        })
+        for anchor_idx in range(3):
+            for gy in range(grid_size):
+                for gx in range(grid_size):
+                    base_idx = ((gy * grid_size + gx) * 3 + anchor_idx) * 85
 
-    # Simple NMS
-    detections = nms(detections, NMS_THRESHOLD)
+                    if base_idx + 84 >= len(outputs):
+                        continue
+
+                    # Parse box outputs
+                    x = outputs[base_idx]
+                    y = outputs[base_idx + 1]
+                    w = outputs[base_idx + 2]
+                    h = outputs[base_idx + 3]
+                    conf = outputs[base_idx + 4]
+
+                    # Check if values need sigmoid (normalized 0-1)
+                    if 0 < x < 1:
+                        import math
+                        x = gx + 1.0 / (1.0 + math.exp(-x))
+                        y = gy + 1.0 / (1.0 + math.exp(-y))
+                        w = anchors[anchor_start + anchor_idx][0] * math.exp(w)
+                        h = anchors[anchor_start + anchor_idx][1] * math.exp(h)
+                        x *= stride
+                        y *= stride
+                        w *= stride
+                        h *= stride
+
+                    if conf < CONF_THRESHOLD:
+                        continue
+
+                    # Find best class
+                    best_class = 0
+                    best_score = 0.0
+                    for c in range(80):
+                        score = outputs[base_idx + 5 + c] * conf
+                        if score > best_score:
+                            best_score = score
+                            best_class = c
+
+                    if best_score < CONF_THRESHOLD:
+                        continue
+
+                    # Convert to x1, y1, x2, y2
+                    x1 = int(x - w / 2)
+                    y1 = int(y - h / 2)
+                    x2 = int(x + w / 2)
+                    y2 = int(y + h / 2)
+
+                    detections.append({
+                        "class_id": best_class,
+                        "class_name": COCO_CLASSES[best_class] if 0 <= best_class < len(COCO_CLASSES) else "unknown",
+                        "confidence": float(best_score),
+                        "bbox": [max(0, x1), max(0, y1), min(INPUT_SIZE, x2), min(INPUT_SIZE, y2)]
+                    })
+
+    # Apply NMS
+    detections = apply_nms(detections, NMS_THRESHOLD)
     return detections
 
-def nms(dets, iou_thresh):
-    """Non-maximum suppression."""
-    if not dets:
+def apply_nms(detections, iou_threshold):
+    """Apply non-maximum suppression."""
+    if not detections:
         return []
 
     # Sort by confidence descending
-    dets.sort(key=lambda x: x["confidence"], reverse=True)
+    detections.sort(key=lambda x: x["confidence"], reverse=True)
 
     keep = []
-    while dets:
-        best = dets.pop(0)
+    while detections:
+        best = detections.pop(0)
         keep.append(best)
-        dets = [d for d in dets if iou(best["bbox"], d["bbox"]) <= iou_thresh]
+
+        # Remove detections with high IoU
+        remaining = []
+        for det in detections:
+            if det["class_id"] != best["class_id"]:
+                remaining.append(det)
+                continue
+
+            iou = calc_iou(best["bbox"], det["bbox"])
+            if iou < iou_threshold:
+                remaining.append(det)
+
+        detections = remaining
 
     return keep
 
-def iou(box1, box2):
+def calc_iou(box1, box2):
     """Calculate IoU between two boxes."""
     x1 = max(box1[0], box2[0])
     y1 = max(box1[1], box2[1])
@@ -146,46 +189,9 @@ def iou(box1, box2):
     area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
     area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
 
-    if area1 + area2 - inter <= 0:
+    if area1 + area2 - inter == 0:
         return 0
     return inter / (area1 + area2 - inter)
-
-def run_inference(image_bytes):
-    """Run RKNN inference on image bytes."""
-    rknn = init_rknn()
-    if rknn is None:
-        return None
-
-    img = preprocess(image_bytes)
-    outputs = rknn.inference(inputs=[img])
-
-    if not outputs or len(outputs) == 0:
-        return []
-
-    return parse_output(outputs)
-
-def main():
-    if len(sys.argv) < 2:
-        # Read from stdin (for subprocess call)
-        img_bytes = sys.stdin.buffer.read()
-    elif sys.argv[1] == "--image" and len(sys.argv) > 2:
-        with open(sys.argv[2], "rb") as f:
-            img_bytes = f.read()
-    elif sys.argv[1] == "--base64" and len(sys.argv) > 2:
-        img_bytes = base64.b64decode(sys.argv[2])
-    else:
-        print(f"Usage: {sys.argv[0]} [--image <path>|--base64 <data>]", file=sys.stderr)
-        sys.exit(1)
-
-    detections = run_inference(img_bytes)
-
-    result = {
-        "success": detections is not None,
-        "detections": detections if detections else [],
-        "count": len(detections) if detections else 0
-    }
-
-    print(json.dumps(result))
 
 if __name__ == "__main__":
     main()
