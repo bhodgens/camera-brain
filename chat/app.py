@@ -44,10 +44,13 @@ SYSTEM_PROMPT = f"""You are a SQL query generator for a camera surveillance data
 {SCHEMA_CONTEXT}
 
 Convert the user's natural language question into a PostgreSQL SELECT query.
+CRITICAL: Return ONLY the raw SQL query - no explanations, no markdown, no text before or after.
+
+Rules:
 - Only generate SELECT queries (no INSERT, UPDATE, DELETE, DROP)
 - Use DATE(detected_at) for date filtering
 - Use LIMIT to restrict results (max 100)
-- Return ONLY the SQL query, no explanation
+- Start with SELECT keyword
 
 Examples:
 Q: "Show me all people detected today"
@@ -58,9 +61,6 @@ A: SELECT count(*) FROM observations WHERE class_name IN ('car', 'truck', 'bus')
 
 Q: "What detections occurred on camera cam4?"
 A: SELECT * FROM observations WHERE camera_id='cam4' ORDER BY detected_at DESC LIMIT 50
-
-Q: "Show me high confidence detections above 0.8"
-A: SELECT * FROM observations WHERE confidence > 0.8 ORDER BY detected_at DESC LIMIT 50
 """
 
 
@@ -90,21 +90,36 @@ def generate_sql_query(question: str) -> str:
             json={
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": question}
+                    {"role": "user", "content": "Question: " + question}
                 ],
-                "max_tokens": 256,
-                "temperature": 0.1,
+                "max_tokens": 200,
+                "temperature": 0.01,  # Very low for deterministic SQL output
                 "stream": False
             },
             timeout=30
         )
         response.raise_for_status()
         result = response.json()
-        sql = result["choices"][0]["message"]["content"].strip()
+        raw_content = result["choices"][0]["message"]["content"].strip()
+
+        app.logger.info(f"LLM raw response: {raw_content[:200]}")
 
         # Extract SQL from response - handle various formats
         # Remove markdown code blocks if present
-        sql = sql.replace("```sql", "").replace("```", "").strip()
+        sql = raw_content.replace("```sql", "").replace("```", "").strip()
+
+        # Remove common prefixes that LLMs add
+        prefixes_to_remove = [
+            "Here's the query:",
+            "Here is the query:",
+            "Query:",
+            "The query:",
+            "SQL:",
+            "The SQL query:"
+        ]
+        for prefix in prefixes_to_remove:
+            if sql.upper().startswith(prefix.upper()):
+                sql = sql[len(prefix):].strip()
 
         # Find SELECT keyword and extract from there
         select_idx = sql.upper().find("SELECT")
@@ -113,10 +128,14 @@ def generate_sql_query(question: str) -> str:
             # Remove anything after the statement (explanations, etc.)
             if ";" in sql:
                 sql = sql.split(";")[0].strip()
+            # Remove trailing explanations
+            if "\n" in sql:
+                sql = sql.split("\n")[0].strip()
+            app.logger.info(f"Extracted SQL: {sql}")
             return sql
 
         # If no SELECT found, log and return None
-        app.logger.warning(f"No SELECT found in LLM response: {sql}")
+        app.logger.warning(f"No SELECT found in LLM response: {raw_content}")
         return None
     except requests.RequestException as e:
         app.logger.error(f"LLM request failed: {e}")
