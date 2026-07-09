@@ -1,6 +1,6 @@
 [Unit]
 Description=Camera Brain Chat Web Interface
-After=network.target llama-server.service
+After=network.target llama-server.service llama-server-text.service
 
 [Service]
 Type=simple
@@ -12,7 +12,7 @@ Environment="DB_HOST=172.18.0.2"
 Environment="DB_PORT=5432"
 Environment="DB_NAME=camera_brain"
 Environment="DB_USER=camera_brain"
-Environment="DB_PASSWORD=camera_brain"
+Environment="DB_PASSWORD=camera_brain_password_change_me"
 Environment="LLAMA_SERVER_URL=http://localhost:8889"
 Environment="MODEL_PATH=/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q8_0.gguf"
 Environment="PORT=8083"
