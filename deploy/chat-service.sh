@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy chat application to rock0
+# Deploy chat application to rock0 on port 80
 
 set -e
 
@@ -32,6 +32,14 @@ ssh rock0 "sudo systemctl daemon-reload && sudo systemctl enable camera-brain-ch
 # Wait for startup
 sleep 2
 
+# Grant CAP_NET_BIND_SERVICE capability to Python binary (allows binding port 80)
+echo "Setting capabilities for port 80..."
+ssh rock0 "sudo setcap 'cap_net_bind_service=+ep' /home/camera-brain/chat-env/bin/python3"
+
+# Restart service to pick up port 80
+echo "Restarting service on port 80..."
+ssh rock0 "sudo systemctl restart camera-brain-chat"
+
 # Check status
 echo ""
 echo "=== Service Status ==="
@@ -39,9 +47,9 @@ ssh rock0 "sudo systemctl status camera-brain-chat --no-pager -l"
 
 echo ""
 echo "=== Health Check ==="
-ssh rock0 "curl -s http://localhost:8080/health | python3 -m json.tool"
+ssh rock0 "curl -s http://localhost/health | python3 -m json.tool"
 
 echo ""
 echo "✓ Chat application deployed successfully!"
-echo "  Web interface: http://rock0:8080"
+echo "  Web interface: http://rock0/"
 echo "  Logs: ssh rock0 'sudo journalctl -u camera-brain-chat -f'"

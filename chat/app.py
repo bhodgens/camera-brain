@@ -249,4 +249,6 @@ def health():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    # Port 80 requires CAP_NET_BIND_SERVICE capability (set by deploy script)
+    port = int(os.getenv("PORT", 80))
+    app.run(host="0.0.0.0", port=port, debug=False)
