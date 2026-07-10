@@ -6,6 +6,7 @@ Uses LFM2.5-1.2B-Instruct for natural language to SQL translation.
 
 import os
 import json
+import re
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify
@@ -25,7 +26,7 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "camera_brain")
 DB_USER = os.getenv("DB_USER", "camera_brain")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "camera_brain_password_change_me")
-DB_PATH = os.getenv("DB_PATH", "/home/camera-brain/camera-brain.db")  # SQLite fallback
+DB_PATH = os.getenv("DB_PATH", "/home/camera-brain/camera-brain.db")
 LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8889")
 MODEL_PATH = os.getenv("MODEL_PATH", "/home/camera-brain/models/LFM2.5-1.2B-Instruct.Q4_K_M.gguf")
 
@@ -33,34 +34,52 @@ MODEL_PATH = os.getenv("MODEL_PATH", "/home/camera-brain/models/LFM2.5-1.2B-Inst
 SCHEMA_CONTEXT = """
 Database schema:
 - observations(id, camera_id, detected_at, type, class_name, confidence, bbox, crop_path)
-- cameras(id, name, rtsp_url, location)
+- cameras(id, name, rtsp_url, location, active, created_at)
 
-The 'bbox' column is JSON: [x1, y1, x2, y2]
-'detected_at' is a timestamp
-'class_name' includes: person, car, truck, bus, bicycle, bird, cat, dog, etc. (80 COCO classes)
+Available fields: id, camera_id, detected_at, type, class_name, confidence, bbox, crop_path, name, rtsp_url, location, active, created_at
+Available class_name values: person, bicycle, car, motorcycle, airplane, bus, train, truck, boat, traffic light, fire hydrant, parking meter, bench, bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe, backpack, umbrella, handbag, tie, suitcase, frisbee, skis, snowboard, sports ball, kite, baseball bat, baseball glove, skateboard, surfboard, tennis racket, bottle, wine glass, cup, fork, knife, spoon, bowl, banana, apple, sandwich, orange, broccoli, carrot, hot dog, pizza, donut, cake, chair, couch, potted plant, bed, dining table, toilet, tv, laptop, mouse, remote, keyboard, cell phone, microwave, oven, toaster, sink, refrigerator, book, clock, vase, scissors, teddy bear, hair drier, toothbrush (80 COCO classes)
+
+NOT available: color, make, model, brand, license_plate, speed, direction, emotion, clothing, age, gender, weapon, or any attributes beyond the schema above.
 """
 
 SYSTEM_PROMPT = f"""You are a SQL query generator for a camera surveillance database.
 {SCHEMA_CONTEXT}
 
-Convert the user's natural language question into a PostgreSQL SELECT query.
-CRITICAL: Return ONLY the raw SQL query - no explanations, no markdown, no text before or after.
+Your task: Convert the user's natural language question into a PostgreSQL SELECT query.
 
-Rules:
-- Only generate SELECT queries (no INSERT, UPDATE, DELETE, DROP)
-- Use DATE(detected_at) for date filtering
-- Use LIMIT to restrict results (max 100)
-- Start with SELECT keyword
+IMPORTANT BEHAVIOR:
+1. If the question asks about fields that DON'T exist (color, make, model, brand, license_plate, speed, emotion, clothing, etc.):
+   - Do NOT generate SQL
+   - Respond with: "I can search for observations by class (car, person, truck, etc.), camera location, time, and confidence level. However, I cannot identify [unavailable field] from the available data. Would you like me to search for [suggested alternative] instead?"
+
+2. If the question is ambiguous or vague:
+   - Do NOT generate SQL
+   - Ask for clarification: "Could you clarify what you're looking for? I can search by class name (car, person, etc.), camera location, time period, or confidence level."
+
+3. If the question CAN be translated to SQL:
+   - Return ONLY the raw SQL query - no explanations, no markdown, no text before or after
+   - Start with SELECT keyword
+   - Use DATE(detected_at) for date filtering
+   - Use LIMIT to restrict results (max 100)
 
 Examples:
 Q: "Show me all people detected today"
 A: SELECT * FROM observations WHERE class_name='person' AND DATE(detected_at)=CURRENT_DATE LIMIT 50
+
+Q: "What color cars were detected?"
+A: I can search for observations by car class, but the system doesn't capture color information. Available data includes detection time, camera location, and confidence score. Would you like me to show you all car detections instead?
+
+Q: "Tell me about the red trucks"
+A: I can find truck detections, but color information isn't available in the system. Would you like to see all truck detections, or trucks from a specific camera or time?
 
 Q: "How many cars were detected yesterday?"
 A: SELECT count(*) FROM observations WHERE class_name IN ('car', 'truck', 'bus') AND DATE(detected_at)=CURRENT_DATE - INTERVAL '1 day'
 
 Q: "What detections occurred on camera cam4?"
 A: SELECT * FROM observations WHERE camera_id='cam4' ORDER BY detected_at DESC LIMIT 50
+
+Q: "Show me fast moving objects"
+A: I can search for detections by class and time, but speed information isn't captured. Would you like to see recent detections across all classes, or filter by a specific class like car or person?
 """
 
 
@@ -82,8 +101,91 @@ def get_db_connection():
         return conn
 
 
+# Fields that trigger clarification responses
+UNAVAILABLE_FIELDS = [
+    "color", "colors", "colour", "colours",
+    "make", "model", "brand", "manufacturer",
+    "license_plate", "license", "plate", "registration",
+    "speed", "velocity", "fast", "slow",
+    "direction", "heading", "bearing",
+    "emotion", "mood", "expression", "face",
+    "clothing", "clothes", "shirt", "pants", "dress", "hat", "shoes",
+    "age", "gender", "sex", "race",
+    "weapon", "knife", "gun", "sword",
+    "bag_type", "purse", "backpack_type"
+]
+
+# Phrases that indicate the LLM returned clarification instead of SQL
+CLARIFICATION_PATTERNS = [
+    r"i can", r"i cannot", r"can't", r"couldn't",
+    r"would you like", r"would you like me to",
+    r"available data", r"not available", r"isn't available", r"doesn't capture",
+    r"could you clarify", r"please clarify",
+    r"i can search", r"i can find",
+    r"unavailable", r"not captured", r"not recorded"
+]
+
+
+def is_clarification_response(text: str) -> bool:
+    """Check if the LLM response is a clarification message rather than SQL."""
+    text_lower = text.lower()
+
+    # Check for unavailable field mentions
+    for field in UNAVAILABLE_FIELDS:
+        if field in text_lower:
+            return True
+
+    # Check for clarification patterns
+    for pattern in CLARIFICATION_PATTERNS:
+        if re.search(pattern, text_lower):
+            return True
+
+    return False
+
+
+def extract_unavailable_field(question: str) -> str:
+    """Extract the unavailable field mentioned in the question."""
+    question_lower = question.lower()
+    for field in UNAVAILABLE_FIELDS:
+        if field in question_lower:
+            return field
+    return "that attribute"
+
+
+def get_suggested_alternative(field: str) -> str:
+    """Suggest an alternative query based on the unavailable field."""
+    field = field.lower()
+
+    if field in ["color", "colors", "colour", "colours"]:
+        return "all detections of that class"
+    elif field in ["make", "model", "brand", "manufacturer"]:
+        return "all vehicles of that class"
+    elif field in ["speed", "velocity", "fast", "slow"]:
+        return "recent detections sorted by time"
+    elif field in ["direction", "heading", "bearing"]:
+        return "detections from a specific camera"
+    elif field in ["emotion", "mood", "expression", "face"]:
+        return "person detections"
+    elif field in ["clothing", "clothes", "shirt", "pants"]:
+        return "person detections with high confidence"
+
+    return "related observations"
+
+
 def generate_sql_query(question: str) -> str:
     """Use LFM 1.2B to convert natural language to SQL."""
+    # First check if the question asks about unavailable fields
+    question_lower = question.lower()
+    unavailable_found = None
+    for field in UNAVAILABLE_FIELDS:
+        if field in question_lower:
+            unavailable_found = field
+            break
+
+    if unavailable_found:
+        alternative = get_suggested_alternative(unavailable_found)
+        return f"CLARIFICATION: I can search by class (car, person, etc.), camera, time, or confidence, but {unavailable_found} information isn't available. Would you like me to show {alternative} instead?"
+
     try:
         response = requests.post(
             f"{LLAMA_SERVER_URL}/v1/chat/completions",
@@ -93,7 +195,7 @@ def generate_sql_query(question: str) -> str:
                     {"role": "user", "content": "Question: " + question}
                 ],
                 "max_tokens": 200,
-                "temperature": 0.01,  # Very low for deterministic SQL output
+                "temperature": 0.01,
                 "stream": False
             },
             timeout=30
@@ -104,39 +206,34 @@ def generate_sql_query(question: str) -> str:
 
         app.logger.info(f"LLM raw response: {raw_content[:200]}")
 
-        # Extract SQL from response - handle various formats
-        # Remove markdown code blocks if present
+        # Check if LLM returned a clarification response
+        if is_clarification_response(raw_content):
+            app.logger.info(f"LLM returned clarification for: {question}")
+            return f"CLARIFICATION: {raw_content}"
+
+        # Extract SQL from response
         sql = raw_content.replace("```sql", "").replace("```", "").strip()
 
-        # Remove common prefixes that LLMs add
-        prefixes_to_remove = [
-            "Here's the query:",
-            "Here is the query:",
-            "Query:",
-            "The query:",
-            "SQL:",
-            "The SQL query:"
-        ]
-        for prefix in prefixes_to_remove:
+        # Remove common prefixes
+        prefixes = ["Here's the query:", "Here is the query:", "Query:", "The query:", "SQL:", "The SQL query:"]
+        for prefix in prefixes:
             if sql.upper().startswith(prefix.upper()):
                 sql = sql[len(prefix):].strip()
 
-        # Find SELECT keyword and extract from there
+        # Find SELECT keyword
         select_idx = sql.upper().find("SELECT")
         if select_idx >= 0:
             sql = sql[select_idx:]
-            # Remove anything after the statement (explanations, etc.)
             if ";" in sql:
                 sql = sql.split(";")[0].strip()
-            # Remove trailing explanations
             if "\n" in sql:
                 sql = sql.split("\n")[0].strip()
             app.logger.info(f"Extracted SQL: {sql}")
             return sql
 
-        # If no SELECT found, log and return None
         app.logger.warning(f"No SELECT found in LLM response: {raw_content}")
         return None
+
     except requests.RequestException as e:
         app.logger.error(f"LLM request failed: {e}")
         return None
@@ -147,22 +244,21 @@ def validate_sql(sql: str) -> tuple[bool, str]:
     if not sql:
         return False, "Empty query"
 
+    if sql.startswith("CLARIFICATION:"):
+        return True, ""  # clarification messages are valid
+
     sql_upper = sql.upper().strip()
 
-    # Only allow SELECT queries - must start with SELECT followed by space or *
     if not (sql_upper.startswith("SELECT ") or sql_upper.startswith("SELECT*")):
-        # Check if it looks like English text instead of SQL
         if "FOR YOU" in sql_upper or "TO RETRIEVE" in sql_upper or "QUERY" in sql_upper:
             return False, "LLM generated explanation instead of SQL - try rephrasing your question"
-        return False, f"Invalid SQL format (must start with SELECT): {sql[:50]}..."
+        return False, f"Invalid SQL format: {sql[:50]}..."
 
-    # Block dangerous operations
     dangerous = ["DROP", "DELETE", "INSERT", "UPDATE", "CREATE", "ALTER", "ATTACH", "DETACH"]
     for keyword in dangerous:
         if keyword in sql_upper:
             return False, f"Dangerous keyword: {keyword}"
 
-    # Basic syntax validation - must have FROM clause for non-COUNT queries
     if "FROM" not in sql_upper and "COUNT" not in sql_upper:
         return False, "Missing FROM clause in query"
 
@@ -179,7 +275,6 @@ def execute_query(sql: str) -> tuple[list, list]:
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
         conn.close()
 
-        # Convert timestamps to strings
         for row in rows:
             for key, val in row.items():
                 if isinstance(val, bytes):
@@ -194,45 +289,35 @@ def execute_query(sql: str) -> tuple[list, list]:
 
 
 def generate_answer(question: str, results: list, sql: str = None) -> str:
-    """Use LLM to generate a natural language answer from query results.
-
-    Provides accurate, specific answers based on actual data - not vague summaries.
-    """
+    """Generate a natural language answer from query results."""
     if not results:
         return "No matching observations found for your query."
 
-    # For COUNT queries, provide a direct answer
     if sql and 'count(*)' in sql.lower():
         count = results[0].get('count', len(results)) if results else 0
         return f"Found {count} observations matching your query."
 
-    # For aggregation queries (GROUP BY), summarize the distribution
     if sql and 'group by' in sql.lower():
         summary_parts = []
-        for row in results[:5]:  # Top 5 results
+        for row in results[:5]:
             class_name = row.get('class_name', row.get('class', 'unknown'))
             cnt = row.get('count', row.get('total', 0))
             if cnt:
                 summary_parts.append(f"{cnt} {class_name}")
-
         if summary_parts:
             return f"Detected: {', '.join(summary_parts)}."
         return f"Found {len(results)} categories of observations."
 
-    # For detail queries, provide a concise summary
     try:
-        # Extract key patterns from results
         class_counts = {}
-        time_range = None
         cameras = set()
 
         for row in results:
             cn = row.get('class_name', 'unknown')
             class_counts[cn] = class_counts.get(cn, 0) + 1
-            if 'detected_at' in row and row['detected_at']:
+            if 'camera_id' in row and row['camera_id']:
                 cameras.add(row.get('camera_id', 'unknown'))
 
-        # Build specific answer
         answer_parts = []
         total = len(results)
 
@@ -254,43 +339,6 @@ def generate_answer(question: str, results: list, sql: str = None) -> str:
         return f"Query returned {len(results)} results."
 
 
-def generate_answer_v2(question: str, results: list) -> str:
-    """Use LLM to generate a natural language answer from query results."""
-    if not results:
-        return "No matching observations found."
-
-    try:
-        # Summarize results for the LLM
-        summary = json.dumps(results[:10], indent=2)  # Limit context
-        prompt = f"""Based on these database results, answer the user's question concisely.
-
-Question: {question}
-
-Results (showing first {len(results[:10])} of {len(results)}):
-{summary}
-
-Provide a clear, concise answer summarizing what was found. If there are many results, mention the count. Be specific about numbers and categories."""
-
-        response = requests.post(
-            f"{LLAMA_SERVER_URL}/v1/chat/completions",
-            json={
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": 512,
-                "temperature": 0.3,
-                "stream": False
-            },
-            timeout=60
-        )
-        response.raise_for_status()
-        result = response.json()
-        return result["choices"][0]["message"]["content"].strip()
-    except requests.RequestException as e:
-        app.logger.error(f"Answer generation failed: {e}")
-        return f"Found {len(results)} results. (Answer generation failed: {e})"
-
-
 @app.route("/")
 def index():
     """Serve the chat interface."""
@@ -309,32 +357,40 @@ def chat():
     app.logger.info(f"=== Chat Request ===")
     app.logger.info(f"Question: {question}")
 
-    # Step 1: Generate SQL from natural language
     sql = generate_sql_query(question)
-    if not sql:
-        app.logger.warning(f"LLM failed to generate SQL for question: {question}")
+
+    # Handle clarification responses
+    if sql and sql.startswith("CLARIFICATION:"):
+        clarification_text = sql[15:]  # Remove "CLARIFICATION: " prefix (15 chars)
+        app.logger.info(f"Returning clarification: {clarification_text}")
         return jsonify({
-            "error": "Failed to generate SQL query - the AI couldn't understand the question. Try rephrasing.",
+            "success": True,
             "question": question,
-            "debug": {
-                "llm_response": "No SELECT statement found in LLM response"
-            }
+            "answer": clarification_text,
+            "is_clarification": True,
+            "sql": None,
+            "result_count": 0,
+            "results": []
+        })
+
+    if not sql:
+        app.logger.warning(f"LLM failed to generate SQL for: {question}")
+        return jsonify({
+            "error": "Failed to generate SQL query - try rephrasing your question",
+            "question": question
         })
 
     app.logger.info(f"Generated SQL: {sql}")
 
-    # Step 2: Validate SQL
     valid, error = validate_sql(sql)
     if not valid:
         app.logger.warning(f"SQL validation failed: {error}")
-        app.logger.warning(f"Invalid SQL: {sql}")
         return jsonify({
             "error": f"Invalid query: {error}",
             "sql": sql,
             "question": question
         }), 400
 
-    # Step 3: Execute query
     try:
         columns, rows = execute_query(sql)
         app.logger.info(f"Query returned {len(rows)} rows")
@@ -353,7 +409,6 @@ def chat():
             }
         }), 500
 
-    # Step 4: Generate natural language answer
     answer = generate_answer(question, rows, sql)
     app.logger.info(f"Answer: {answer}")
 
@@ -363,7 +418,7 @@ def chat():
         "sql": sql,
         "answer": answer,
         "result_count": len(rows),
-        "results": rows[:50]  # Limit returned results
+        "results": rows[:50]
     })
 
 
@@ -372,14 +427,12 @@ def health():
     """Health check endpoint."""
     status = {"status": "ok", "llama_server": "unknown", "db": "unknown"}
 
-    # Check Llama server
     try:
         resp = requests.get(f"{LLAMA_SERVER_URL}/health", timeout=5)
         status["llama_server"] = "connected" if resp.status_code == 200 else "error"
     except:
         status["llama_server"] = "disconnected"
 
-    # Check database
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -394,6 +447,5 @@ def health():
 
 
 if __name__ == "__main__":
-    # Port 80 requires CAP_NET_BIND_SERVICE capability (set by deploy script)
     port = int(os.getenv("PORT", 80))
     app.run(host="0.0.0.0", port=port, debug=False)
