@@ -149,15 +149,22 @@ def validate_sql(sql: str) -> tuple[bool, str]:
 
     sql_upper = sql.upper().strip()
 
-    # Only allow SELECT queries
-    if not sql_upper.startswith("SELECT"):
-        return False, "Only SELECT queries allowed"
+    # Only allow SELECT queries - must start with SELECT followed by space or *
+    if not (sql_upper.startswith("SELECT ") or sql_upper.startswith("SELECT*")):
+        # Check if it looks like English text instead of SQL
+        if "FOR YOU" in sql_upper or "TO RETRIEVE" in sql_upper or "QUERY" in sql_upper:
+            return False, "LLM generated explanation instead of SQL - try rephrasing your question"
+        return False, f"Invalid SQL format (must start with SELECT): {sql[:50]}..."
 
     # Block dangerous operations
     dangerous = ["DROP", "DELETE", "INSERT", "UPDATE", "CREATE", "ALTER", "ATTACH", "DETACH"]
     for keyword in dangerous:
         if keyword in sql_upper:
             return False, f"Dangerous keyword: {keyword}"
+
+    # Basic syntax validation - must have FROM clause for non-COUNT queries
+    if "FROM" not in sql_upper and "COUNT" not in sql_upper:
+        return False, "Missing FROM clause in query"
 
     return True, ""
 
@@ -299,14 +306,19 @@ def chat():
     if not question:
         return jsonify({"error": "No question provided"}), 400
 
+    app.logger.info(f"=== Chat Request ===")
     app.logger.info(f"Question: {question}")
 
     # Step 1: Generate SQL from natural language
     sql = generate_sql_query(question)
     if not sql:
+        app.logger.warning(f"LLM failed to generate SQL for question: {question}")
         return jsonify({
-            "error": "Failed to generate SQL query",
-            "question": question
+            "error": "Failed to generate SQL query - the AI couldn't understand the question. Try rephrasing.",
+            "question": question,
+            "debug": {
+                "llm_response": "No SELECT statement found in LLM response"
+            }
         })
 
     app.logger.info(f"Generated SQL: {sql}")
@@ -314,16 +326,36 @@ def chat():
     # Step 2: Validate SQL
     valid, error = validate_sql(sql)
     if not valid:
-        return jsonify({"error": f"Invalid query: {error}"}), 400
+        app.logger.warning(f"SQL validation failed: {error}")
+        app.logger.warning(f"Invalid SQL: {sql}")
+        return jsonify({
+            "error": f"Invalid query: {error}",
+            "sql": sql,
+            "question": question
+        }), 400
 
     # Step 3: Execute query
     try:
         columns, rows = execute_query(sql)
+        app.logger.info(f"Query returned {len(rows)} rows")
     except Exception as e:
-        return jsonify({"error": f"Query failed: {str(e)}", "sql": sql}), 500
+        app.logger.error(f"=== Query Execution Failed ===")
+        app.logger.error(f"Question: {question}")
+        app.logger.error(f"Generated SQL: {sql}")
+        app.logger.error(f"Error: {e}")
+        return jsonify({
+            "error": f"Query failed: {str(e)}",
+            "sql": sql,
+            "question": question,
+            "debug": {
+                "error_type": type(e).__name__,
+                "error_detail": str(e)
+            }
+        }), 500
 
     # Step 4: Generate natural language answer
     answer = generate_answer(question, rows, sql)
+    app.logger.info(f"Answer: {answer}")
 
     return jsonify({
         "success": True,
