@@ -498,6 +498,8 @@
             const question = questionInput.value.trim();
             if (!question) return;
 
+            // Add user message to chat FIRST
+            addMessage(question, 'user');
             questionInput.value = '';
             sendBtn.disabled = true;
             addLoadingIndicator();
