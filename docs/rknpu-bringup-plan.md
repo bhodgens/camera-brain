@@ -200,13 +200,55 @@ Since Ansible isn't installed yet on the Mac:
 - This plan: `docs/rknpu-bringup-plan.md`
 - Benchmark script: `benchmark.py`
 
+## Critical Fix: swiotlb Memory Allocation (2026-07-09)
+
+### Problem
+NPU initialization was failing with "swiotlb: coherent allocation failed, size=11993088" errors.
+The RKNN driver requires ~12MB of contiguous DMA-coherent memory, but the default swiotlb
+(Software I/O Translation Lookaside Buffer) was too small.
+
+### Root Cause
+The kernel boot parameters didn't include `swiotlb=262144`, so the default swiotlb size
+(~64MB total, with limited contiguous allocation size) was insufficient for NPU buffer allocation.
+
+### Solution
+Added `extraargs=swiotlb=262144` to `/boot/uEnv.txt` on all worker nodes.
+
+**Steps:**
+```bash
+# On each worker node (rock1-5)
+echo "extraargs=swiotlb=262144" | sudo tee -a /boot/uEnv.txt
+sudo reboot
+```
+
+**Verification:**
+```bash
+cat /proc/cmdline  # Should show swiotlb=262144
+dmesg | grep -i rknpu  # Should show "assigned reserved memory node rknpu"
+systemctl is-active camera-brain-worker  # Should be "active"
+```
+
+### Current Status
+| Node | swiotlb Applied | NPU Status |
+|------|----------------|------------|
+| rock1 | Yes (but offline - boot issue) | Unknown |
+| rock2 | Yes | Working - detecting objects |
+| rock3 | Yes | Working - detecting objects |
+| rock4 | Yes | Working - detecting objects |
+| rock5 | Yes | Working - detecting objects |
+
+**Note**: rock1 failed to boot after the swiotlb change and may need physical recovery
+(power cycle or console access to fix boot configuration).
+
 ## Risks (Updated)
 - ~~**RKNN SDK version mismatch**: RESOLVED - v2 runtime works with v0.4.2 driver~~
+- ~~**swiotlb allocation failure**: RESOLVED - added swiotlb=262144 to kernel cmdline~~
 - **Memory constraints**: Workers have 2GB RAM. NPU shares system memory (no dedicated VRAM). Model + NPU working memory must fit.
 - **INT8 quantization quality**: NPU is optimized for INT8. F16 compute may be limited/slow.
 - **SDK closed-source**: librknnrt.so is a binary blob from Rockchip.
 - **Python wrappers broken**: rknnlite (both v1 and v2) has compatibility issues. Must use C API directly.
 - **No kernel upgrade needed**: The v0.4.2 driver works fine with v2.3.2 runtime. No need to reinstall OS or upgrade kernel.
+- **rock1 boot failure**: One worker node failed to boot after swiotlb change - may need physical recovery.
 
 ## Software Stack Summary (Updated)
 
