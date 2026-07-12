@@ -33,13 +33,16 @@ MODEL_PATH = os.getenv("MODEL_PATH", "/home/camera-brain/models/LFM2.5-1.2B-Inst
 # Schema awareness for the LLM
 SCHEMA_CONTEXT = """
 Database schema:
-- observations(id, camera_id, detected_at, type, class_name, confidence, bbox, crop_path)
+- observations(id, camera_id, detected_at, type, class_name, confidence, bbox, crop_path, color, vehicle_type, gender, gender_conf, age)
 - cameras(id, name, rtsp_url, location, active, created_at)
 
-Available fields: id, camera_id, detected_at, type, class_name, confidence, bbox, crop_path, name, rtsp_url, location, active, created_at
+Available fields: id, camera_id, detected_at, type, class_name, confidence, bbox, crop_path, color, vehicle_type, gender, gender_conf, age, name, rtsp_url, location, active, created_at
 Available class_name values: person, bicycle, car, motorcycle, airplane, bus, train, truck, boat, traffic light, fire hydrant, parking meter, bench, bird, cat, dog, horse, sheep, cow, elephant, bear, zebra, giraffe, backpack, umbrella, handbag, tie, suitcase, frisbee, skis, snowboard, sports ball, kite, baseball bat, baseball glove, skateboard, surfboard, tennis racket, bottle, wine glass, cup, fork, knife, spoon, bowl, banana, apple, sandwich, orange, broccoli, carrot, hot dog, pizza, donut, cake, chair, couch, potted plant, bed, dining table, toilet, tv, laptop, mouse, remote, keyboard, cell phone, microwave, oven, toaster, sink, refrigerator, book, clock, vase, scissors, teddy bear, hair drier, toothbrush (80 COCO classes)
+Available vehicle_type values: sedan, SUV, truck, van, pickup, bus, motorcycle, bicycle
+Available gender values: man, woman
+Available color values: red, blue, green, yellow, white, black, silver, gray, orange, brown
 
-NOT available: color, make, model, brand, license_plate, speed, direction, emotion, clothing, age, gender, weapon, or any attributes beyond the schema above.
+NOT available: make, model (brand-specific), license_plate, speed, direction, emotion, clothing details, person identity
 """
 
 SYSTEM_PROMPT = f"""You are a SQL query generator for a camera surveillance database.
@@ -48,7 +51,7 @@ SYSTEM_PROMPT = f"""You are a SQL query generator for a camera surveillance data
 Your task: Convert the user's natural language question into a PostgreSQL SELECT query.
 
 IMPORTANT BEHAVIOR:
-1. If the question asks about fields that DON'T exist (color, make, model, brand, license_plate, speed, emotion, clothing, etc.):
+1. If the question asks about fields that DON'T exist (make, model, brand, license_plate, speed, emotion, clothing, etc.):
    - Do NOT generate SQL
    - Respond with: "I can search for observations by class (car, person, truck, etc.), camera location, time, and confidence level. However, I cannot identify [unavailable field] from the available data. Would you like me to search for [suggested alternative] instead?"
 
@@ -63,6 +66,18 @@ IMPORTANT BEHAVIOR:
    - Use LIMIT to restrict results (max 100)
 
 Examples:
+Q: "Show me all women detected today"
+A: SELECT * FROM observations WHERE gender='woman' AND DATE(detected_at)=CURRENT_DATE LIMIT 50
+
+Q: "What vehicle types were detected?"
+A: SELECT vehicle_type, COUNT(*) FROM observations WHERE vehicle_type IS NOT NULL GROUP BY vehicle_type
+
+Q: "Show me red cars"
+A: SELECT * FROM observations WHERE class_name='car' AND color='red' LIMIT 50
+
+Q: "How many SUVs were detected yesterday?"
+A: SELECT COUNT(*) FROM observations WHERE vehicle_type='SUV' AND DATE(detected_at)=CURRENT_DATE - INTERVAL '1 day'
+
 Q: "Show me all people detected today"
 A: SELECT * FROM observations WHERE class_name='person' AND DATE(detected_at)=CURRENT_DATE LIMIT 50
 
@@ -79,8 +94,9 @@ Q: "What detections occurred on camera cam4?"
 A: SELECT * FROM observations WHERE camera_id='cam4' ORDER BY detected_at DESC LIMIT 50
 
 Q: "Show me fast moving objects"
-A: I can search for detections by class and time, but speed information isn't captured. Would you like to see recent detections across all classes, or filter by a specific class like car or person?
+A: I can search by class and time, but speed information isn't captured. Would you like to see recent detections across all classes, or filter by a specific class like car or person?
 """
+
 
 
 def get_db_connection():
@@ -101,17 +117,21 @@ def get_db_connection():
         return conn
 
 
-# Fields that trigger clarification responses
+# Fields that are NOT available in the database
 UNAVAILABLE_FIELDS = [
-    "color", "colors", "colour", "colours",
+    # Vehicle specifics
     "make", "model", "brand", "manufacturer",
     "license_plate", "license", "plate", "registration",
+    # Movement
     "speed", "velocity", "fast", "slow",
     "direction", "heading", "bearing",
+    # Personal attributes (not captured)
     "emotion", "mood", "expression", "face",
     "clothing", "clothes", "shirt", "pants", "dress", "hat", "shoes",
-    "age", "gender", "sex", "race",
+    "race", "ethnicity",
+    # Weapons
     "weapon", "knife", "gun", "sword",
+    # Other
     "bag_type", "purse", "backpack_type"
 ]
 
@@ -361,7 +381,7 @@ def chat():
 
     # Handle clarification responses
     if sql and sql.startswith("CLARIFICATION:"):
-        clarification_text = sql[15:]  # Remove "CLARIFICATION: " prefix (15 chars)
+        clarification_text = sql[16:]  # Remove "CLARIFICATION: " prefix
         app.logger.info(f"Returning clarification: {clarification_text}")
         return jsonify({
             "success": True,
